@@ -1,0 +1,22 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: celery-worker
+spec:
+  replicas: 2 
+  selector:
+    matchLabels:
+      app: celery-worker
+  template:
+    metadata:
+      labels:
+        app: celery-worker
+    spec:
+      containers:
+        - name: celery-worker
+          image: heavenhold-ai:latest
+          imagePullPolicy: Never
+          env:                
+            - name: DEV_BROKER_URL
+              value: "redis://redis-service:6379/0"
+          command: ["celery", "-A", "app.app:celery", "worker", "--loglevel=info"]

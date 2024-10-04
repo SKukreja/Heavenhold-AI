@@ -1,0 +1,9 @@
+Flask
+requests
+openai
+Pillow
+apscheduler
+Celery
+redis
+boto3
+gunicorn

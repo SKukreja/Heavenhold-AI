@@ -1,0 +1,39 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flask
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: flask
+  template:
+    metadata:
+      labels:
+        app: flask
+    spec:
+      containers:
+        - name: flask
+          image: heavenhold-ai:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 5000
+          env:
+            - name: DEV_BROKER_URL                     
+              value: "redis://redis-service:6379/0"
+          command: ["gunicorn", "-b", "0.0.0.0:5000", "app.app:app"]
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: flask-service
+spec:
+  selector:
+    app: flask
+  ports:
+    - protocol: TCP
+      port: 80  # This is the port exposed externally
+      targetPort: 5000  # This is the port your Flask app is listening on
+      nodePort: 30000  # This will expose the service on port 30000 of your localhost
+  type: NodePort

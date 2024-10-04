@@ -1,0 +1,35 @@
+services:
+  # Flask web application
+  flask:
+    build: .
+    ports:
+      - "5000:5000"  # Exposes Flask app on port 5000
+    environment:
+      - ENV=DEV
+    depends_on:
+      - redis  # Ensure Redis is started before the web app
+    command: gunicorn -b 0.0.0.0:5000 app.app:app  # Runs Flask using Gunicorn
+
+  # Celery worker for processing tasks
+  celery_worker:
+    build: .
+    depends_on:
+      - redis
+    environment:
+      - ENV=DEV
+    command: celery -A app.celery_tasks worker --loglevel=info  # Runs Celery worker
+
+  # Celery Beat for periodic tasks (like checking S3)
+  celery_beat:
+    build: .
+    depends_on:
+      - redis
+    environment:
+      - ENV=DEV
+    command: celery -A app.celery_tasks beat --loglevel=info  # Runs Celery Beat scheduler
+
+  # Redis as the message broker for Celery
+  redis:
+    image: redis:latest
+    ports:
+      - "6379:6379"  # Exposes Redis on port 6379
