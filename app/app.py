@@ -4,6 +4,8 @@ import logging
 from flask import Flask, request, jsonify, render_template_string
 from werkzeug.utils import secure_filename
 import boto3
+import redis
+import json
 from celery import Celery
 
 # Configure logging
@@ -39,6 +41,7 @@ celery = make_celery(app)
 
 # Import celery tasks to ensure they are registered
 from . import celery_tasks
+import uuid
 
 # Allowed file extensions
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif'}
@@ -52,6 +55,17 @@ def allowed_file(filename):
 # Routes
 @app.route('/')
 def index():
+    # Initialize Redis client
+    redis_client = redis.Redis(host='redis-service', port=6379, db=0)
+
+    # Retrieve cached data
+    cached_data = redis_client.get('hero_data')
+    dropdown_options = []
+    if cached_data is not None:
+        hero_data = json.loads(cached_data)
+        heroes_list = hero_data['data']['heroes']['nodes']
+        dropdown_options = sorted([(hero['slug'], hero['title']) for hero in heroes_list])
+        logger.info("Retrieved hero data from cache.")
     return render_template_string('''
         <!DOCTYPE html>
         <html>
@@ -61,13 +75,18 @@ def index():
         <body>
             <h1>Upload an Image</h1>
             <form method="POST" action="/upload" enctype="multipart/form-data">
+                <select name="hero_name" id="hero_name">
+                    {% for slug, title in dropdown_options %}
+                        <option value="{{ slug }}">{{ title }}</option>
+                    {% endfor %}
+                </select>
                 <label for="image">Select image to upload:</label>
                 <input type="file" name="image" id="image">
                 <input type="submit" value="Upload Image">
             </form>
         </body>
         </html>
-    ''')
+    ''', dropdown_options=dropdown_options)
 
 @app.route('/upload', methods=['POST'])
 def upload_image():
@@ -75,6 +94,7 @@ def upload_image():
         return jsonify({'error': 'No image part in the request'}), 400
 
     image = request.files['image']
+    hero_name = request.form.get('hero_name')
 
     if image.filename == '':
         return jsonify({'error': 'No selected file'}), 400
@@ -82,6 +102,12 @@ def upload_image():
     if image and allowed_file(image.filename):
         filename = secure_filename(image.filename)
         file_content = image.read()
+
+        # Generate a GUID
+        guid = str(uuid.uuid4())
+
+        # Construct the new filename
+        new_filename = f"{hero_name}_{guid}{filename[filename.rfind('.'):]}"
 
         # Upload the image to S3
         s3_client = boto3.client(
@@ -91,7 +117,9 @@ def upload_image():
             region_name=app.config['AWS_REGION'],
         )
         s3_client.put_object(
-            Bucket=app.config['AWS_S3_BUCKET'], Key=filename, Body=file_content
+            Bucket=app.config['AWS_S3_BUCKET'], 
+            Key=f"hero-stories/{new_filename}", 
+            Body=file_content
         )
 
         return jsonify({'message': 'Image successfully uploaded'}), 200

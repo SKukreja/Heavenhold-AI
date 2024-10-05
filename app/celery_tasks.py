@@ -2,6 +2,9 @@
 
 import logging
 import boto3
+import os
+import io
+import tempfile
 from flask import current_app
 from .app import celery
 from .assistant_prompt import system_prompt
@@ -9,7 +12,8 @@ from .hero_query import hero_query
 import requests
 import json
 import redis
-import openai
+import numpy as np
+from PIL import Image
 
 # Configure logging
 logging.basicConfig(
@@ -24,9 +28,15 @@ logger = logging.getLogger(__name__)
 def setup_periodic_tasks(sender, **kwargs):
     # Schedule to check 'hero-stories' folder every 30 seconds
     sender.add_periodic_task(
-        180.0,  # Run every 30 seconds (adjust as needed)
+        60.0,  # Run every 30 seconds (adjust as needed)
         check_and_process_s3_images.s('hero-stories'),
         name="Check 'hero-stories' folder in S3 bucket",
+    )
+
+    sender.add_periodic_task(
+        60.0,  # Run every 30 seconds (adjust as needed)
+        check_and_process_s3_images.s('hero-portraits'),
+        name="Check 'hero-portraits' folder in S3 bucket",
     )
 
     # Schedule to fetch hero stories data every 10 minutes
@@ -74,8 +84,8 @@ def fetch_hero_data():
         logger.exception("Error fetching hero data:")
 
 @celery.task
-def process_hero_story_task(key, folder):
-    test_hero = "Exorcist Swordswoman Saya"
+def process_hero_story_task(key, folder, hero_name):
+    if key == "hero-stories/": return
     logger.info(f"Processing image: {key} from folder '{folder}' as a hero story")
     try:
         # Initialize Redis client
@@ -92,19 +102,20 @@ def process_hero_story_task(key, folder):
             # Extract the list of heroes
             heroes_list = hero_data['data']['heroes']['nodes']
 
-            # Search for the hero with name matching test_hero
-            test_hero_data = None
+            db_hero_data = None
+
+            # Search for the hero with matching slug
             for hero in heroes_list:
-                if hero['title'] == test_hero:
-                    test_hero_data = hero
+                if hero['slug'] == hero_name:
+                    db_hero_data = hero
                     break
 
-            if test_hero_data is not None:
+            if db_hero_data is not None:
                 # Now test_hero_data contains the data for the hero named test_hero
-                logger.info(f"Found hero data for {test_hero}: {test_hero_data}")
+                logger.info(f"Found hero data for {hero_name}")
                 # Proceed with using test_hero_data as needed
             else:
-                logger.warning(f"Hero '{test_hero}' not found in hero data.")
+                logger.warning(f"Hero '{hero_name}' not found in hero data.")
                 return  # Exit the task if the hero is not found
 
             # Initialize S3 client using app.config variables
@@ -188,7 +199,7 @@ def process_hero_story_task(key, folder):
                 # POST the hero's story and ID to the specified URL
                 update_url = current_app.config['WORDPRESS_SITE'] + '/wp-json/heavenhold/v1/update-story'
                 payload = {
-                    'hero_id': test_hero_data['databaseId'],
+                    'hero_id': db_hero_data['databaseId'],
                     'story': hero_data['story'],
                 }
                 response = requests.post(update_url, json=payload)
@@ -198,7 +209,7 @@ def process_hero_story_task(key, folder):
                 # Delete the image after processing (if desired)
                 s3_client.delete_object(Bucket=bucket_name, Key=key)
                 fetch_hero_data.delay()
-                logger.info(f"Image {key} processed successfully.")
+                logger.info(f"{key} processed successfully, deleting from S3 bucket.")
             except json.JSONDecodeError as e:
                 logger.error("Failed to parse JSON from AI response")
                 logger.error(e)
@@ -209,7 +220,111 @@ def process_hero_story_task(key, folder):
     except Exception as e:
         logger.exception(f"Error processing image {key} from folder '{folder}':")
 
+@celery.task
+def process_hero_portrait_task(key, folder, hero_name, region):
+    if key == "hero-portraits/": return
+    logger.info(f"Processing image: {key} from folder '{folder}' as a hero portrait")
+    try:
+        # Initialize Redis client
+        redis_client = redis.Redis(host='redis-service', port=6379, db=0)
 
+        api_key = current_app.config['OPENAI_API_KEY']
+
+        # Retrieve cached data
+        cached_data = redis_client.get('hero_data')
+        if cached_data is not None:
+            hero_data = json.loads(cached_data)
+            logger.info("Retrieved hero data from cache.")
+
+            # Extract the list of heroes
+            heroes_list = hero_data['data']['heroes']['nodes']
+
+            db_hero_data = None
+
+            # Search for the hero with name matching test_hero
+            for hero in heroes_list:
+                if hero['slug'] == hero_name:
+                    db_hero_data = hero
+                    break
+
+            if db_hero_data is not None:
+                # Now test_hero_data contains the data for the hero named test_hero
+                logger.info(f"Found hero data for {hero_name}")
+                # Proceed with using test_hero_data as needed
+            else:
+                logger.warning(f"Hero '{hero_name}' not found in hero data.")
+                return  # Exit the task if the hero is not found
+
+            # Initialize S3 client using app.config variables
+            s3_client = boto3.client(
+                's3',
+                aws_access_key_id=current_app.config['AWS_ACCESS_KEY_ID'],
+                aws_secret_access_key=current_app.config['AWS_SECRET_ACCESS_KEY'],
+                region_name=current_app.config['AWS_REGION'],
+            )
+
+            # Retrieve and process the image from S3
+            response = s3_client.get_object(
+                Bucket=current_app.config['AWS_S3_BUCKET'],
+                Key=key
+            )
+            image_content = response['Body'].read()
+
+            # Create a temporary directory
+            with tempfile.TemporaryDirectory() as temp_dir:
+                # Save the image in the temporary directory
+                image_path = os.path.join(temp_dir, "image.jpg")
+                with open(image_path, 'wb') as f:
+                    f.write(image_content)
+
+                # Detect the black bar width
+                left_bar, right_bar = detect_black_bar_width(image_path)
+                print(f"Detected black bar width: Left - {left_bar}px, Right - {right_bar}px")
+
+                # After determining the bar widths, you can crop the image accordingly:
+                img = Image.open(image_path)
+                cropped_img = img.crop((left_bar, 0, img.width - right_bar, img.height))
+
+                # Rotate the image if cropped width is longer than height
+                if cropped_img.width > cropped_img.height:
+                    cropped_img = cropped_img.rotate(-90, expand=True)
+
+                # Convert the cropped image to a byte stream
+                img_byte_arr = io.BytesIO()
+                cropped_img.save(img_byte_arr, format='JPEG')
+                img_byte_arr.seek(0)
+
+                # POST the image 
+                try:                
+                    logger.info("Successfully processed portrait image")
+                    # POST the hero's story and ID to the specified URL
+                    update_url = current_app.config['WORDPRESS_SITE'] + '/wp-json/heavenhold/v1/update-portrait'
+                    files = {
+                        'image': (hero_name + '.jpg', img_byte_arr, 'image/jpeg') 
+                    }
+                    payload = {
+                        'hero_id': db_hero_data['databaseId'],
+                        'region': region,
+                    }
+                    response = requests.post(update_url, files=files, data=payload)
+                    response.raise_for_status()
+                    logger.info("Hero portrait updated successfully")
+                    bucket_name = current_app.config['AWS_S3_BUCKET']
+
+                    # Delete the image after processing (if desired)
+                    s3_client.delete_object(Bucket=bucket_name, Key=key)                    
+                    fetch_hero_data.delay()
+                    logger.info(f"{key} processed successfully, deleting from S3 bucket.")
+                except json.JSONDecodeError as e:
+                    logger.error("Failed to parse JSON from AI response")
+                    logger.error(e)
+                    # Handle the error accordingly
+
+        else:
+            logger.warning("Hero data not found in cache")
+
+    except Exception as e:
+        logger.exception(f"Error processing image {key} from folder '{folder}':")
 
 @celery.task
 def check_and_process_s3_images(folder):
@@ -231,13 +346,25 @@ def check_and_process_s3_images(folder):
 
         if 'Contents' in response:
             logger.info(f"Found {len(response['Contents'])} items in S3 bucket folder '{folder}'.")
+
             for obj in response['Contents']:
                 key = obj['Key']
                 logger.info(f"Found image: {key}, adding to processing queue.")
-                if folder == "hero-stories":
-                    process_hero_story_task.delay(key, folder)
+                # Extract hero_name from key
+                filename = key.split('/')[-1]
+                filename_without_extension = filename.split('.')[0]
+                hero_name_parts = filename_without_extension.split('_')
+                if len(hero_name_parts) >= 2:
+                    hero_name = hero_name_parts[0]
+                    if folder == "hero-stories":
+                        process_hero_story_task.delay(key, folder, hero_name)
+                    elif folder == "hero-portraits":
+                        region = hero_name_parts[1]
+                        process_hero_portrait_task.delay(key, folder, hero_name, region)
+                    else:
+                        process_image_task.delay(key, folder)
                 else:
-                    process_image_task.delay(key, folder)
+                    logger.warning(f"Invalid filename format: {filename}. Skipping processing.")
         else:
             logger.info(f"No images found in the S3 bucket folder '{folder}'.")
     except Exception as e:
@@ -262,12 +389,42 @@ def process_image_task(key, folder):
         )
         file_content = response['Body'].read()
 
-        # Simulate image processing
-        import time
-        time.sleep(2)
-
         # Delete the image after processing (if desired)
         # s3_client.delete_object(Bucket=current_app.config['AWS_S3_BUCKET'], Key=key)
         logger.info(f"Image {key} processed successfully.")
     except Exception as e:
         logger.exception(f"Error processing image {key} from folder '{folder}':")
+
+def detect_black_bar_width(image_path, threshold=10, black_threshold=50):
+
+    # Open image and convert to grayscale
+    img = Image.open(image_path).convert('L')  # Convert to grayscale ('L' mode)
+    img_array = np.array(img)
+
+    height, width = img_array.shape
+
+    def detect_black_bar_from_edge(edge_pixels):
+        """ Helper function to detect the width of the black bar on one side. """
+        black_bar_width = 0
+        consecutive_non_black_rows = 0
+
+        # Traverse pixels from the edge towards the center
+        for i in range(width):
+            # Check if the entire column of pixels is black
+            if np.all(edge_pixels[:, i] < black_threshold):
+                black_bar_width += 1
+            else:
+                consecutive_non_black_rows += 1
+                if consecutive_non_black_rows >= threshold:
+                    break
+        return black_bar_width
+
+    # Get pixel columns for the left and right sides of the image
+    left_edge = img_array[:, :width//2]  # Left half of the image
+    right_edge = img_array[:, width//2:]  # Right half of the image
+
+    # Detect black bars on both sides
+    left_black_bar_width = detect_black_bar_from_edge(left_edge)
+    right_black_bar_width = detect_black_bar_from_edge(np.fliplr(right_edge))  # Flip for right side detection
+
+    return left_black_bar_width, right_black_bar_width

@@ -7,3 +7,5 @@ Celery
 redis
 boto3
 gunicorn
+discord
+numpy
