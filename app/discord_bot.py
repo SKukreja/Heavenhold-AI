@@ -5,6 +5,7 @@ from typing import Literal
 import uuid
 import discord
 import boto3
+import requests
 from discord.ext import commands
 from discord import app_commands
 import redis
@@ -23,7 +24,7 @@ parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
 
-from config import DISCORD_TOKEN, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION, AWS_S3_BUCKET, GUILD_ID
+from config import DISCORD_TOKEN, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION, AWS_S3_BUCKET, GUILD_ID, WORDPRESS_SITE
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -55,7 +56,7 @@ def fetch_hero_data():
 
 dropdown_options, hero_name_mapping = fetch_hero_data()
 
-class MyBot(commands.Bot):
+class Lahn(commands.Bot):
     def __init__(self):
         super().__init__(command_prefix="!", intents=intents)
     
@@ -66,15 +67,17 @@ class MyBot(commands.Bot):
         self.tree.add_command(submit_hero_bio)
         self.tree.add_command(submit_hero_portrait)
         self.tree.add_command(submit_hero_story)
+        self.tree.add_command(submit_hero_stats)
+        self.tree.add_command(add_new_hero)
         await self.tree.sync(guild=guild)
         logger.info("Bot started successfully.")
         
 
-bot = MyBot()
+bot = Lahn()
 
 @bot.event
 async def on_ready():
-    logger.info(f'We have logged in as {bot.user}')
+    logger.info(f'Logged in as {bot.user}')
 
 @bot.command(name="manual_sync_commands", hidden=True)
 @commands.is_owner()
@@ -85,6 +88,10 @@ async def manual_sync_commands(ctx):
         ctx.bot.tree.remove_command(submit_hero_portrait)
         ctx.bot.tree.remove_command(submit_hero_illustration)
         ctx.bot.tree.remove_command(submit_hero_bio)
+        ctx.bot.tree.remove_command(submit_hero_stats)
+        ctx.bot.tree.remove_command(add_new_hero)
+        ctx.bot.tree.add_command(add_new_hero)
+        ctx.bot.tree.add_command(submit_hero_stats)
         ctx.bot.tree.add_command(submit_hero_illustration)
         ctx.bot.tree.add_command(submit_hero_bio)
         ctx.bot.tree.add_command(submit_hero_portrait)
@@ -271,6 +278,62 @@ async def bio_hero_name_autocomplete(interaction: discord.Interaction, current: 
     return suggestions
 
 # Define the slash command
+@app_commands.command(name="submit_hero_stats", description="Upload an image with a hero's level 100 stats to update the site.")
+@app_commands.describe(hero="Select a hero", image="Attach an image")
+async def submit_hero_stats(interaction: discord.Interaction, hero: str, image: discord.Attachment):
+    # Get the hero title from the slug
+    hero_title = hero_name_mapping.get(hero, "Unknown Hero")
+    # Acknowledge the interaction
+    await interaction.response.defer(thinking=True)
+    # Process the image and hero name as needed
+    if image is not None:
+        filename = image.filename
+        file_content = await image.read()
+
+        # Generate a GUID
+        guid = str(uuid.uuid4())
+
+        # Construct the new filename
+        file_extension = os.path.splitext(filename)[1]
+        new_filename = f"{hero}_{guid}{file_extension}"
+
+        # Upload the image to S3
+        s3_client = boto3.client(
+            's3',
+            aws_access_key_id=AWS_ACCESS_KEY_ID,
+            aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+            region_name=AWS_REGION,
+        )
+        s3_client.put_object(
+            Bucket=AWS_S3_BUCKET, 
+            Key=f"hero-stats/{new_filename}", 
+            Body=file_content
+        )
+        logger.info(f"Uploaded image to S3: {new_filename}")
+
+        # Send a confirmation message
+        await interaction.followup.send(f"**Hero:** {hero_title}\nStats image uploaded successfully! Revision will be added to queue in 2-3 minutes.")
+
+# Autocomplete function for hero
+@submit_hero_stats.autocomplete('hero')
+async def stats_hero_name_autocomplete(interaction: discord.Interaction, current: str):
+    global dropdown_options
+    if dropdown_options is None:
+        logger.info("No hero data found, please try again.")
+        dropdown_options, hero_name_mapping = fetch_hero_data()
+        if dropdown_options is None: 
+            await interaction.followup.send("No hero data found. Please try again later.")
+            return
+    # Suggest hero names based on user input
+    suggestions = []
+    for slug, title in dropdown_options:
+        if current.lower() in title.lower():
+            suggestions.append(app_commands.Choice(name=title, value=slug))
+            if len(suggestions) >= 25:
+                break
+    return suggestions
+
+# Define the slash command
 @app_commands.command(name="submit_hero_illustration", description="Upload an image with a hero's illustration (no background) to update the site.")
 @app_commands.describe(hero="Select a hero", image="Attach an image")
 async def submit_hero_illustration(interaction: discord.Interaction, hero: str, image: discord.Attachment, region: Literal['Global', 'Japan']):
@@ -326,5 +389,26 @@ async def illustration_hero_name_autocomplete(interaction: discord.Interaction, 
                 break
     return suggestions
 
-bot.run(DISCORD_TOKEN)
+# Define the slash command
+@app_commands.command(name="add_new_hero", description="Add a new blank hero to the site.")
+@app_commands.describe(name="Enter the hero's full name (with title)")
+async def add_new_hero(interaction: discord.Interaction, name: str):
+    # Get the hero title from the slug
+    hero_title = hero_name_mapping.get(name, "Unknown Hero")
+    # Acknowledge the interaction
+    await interaction.response.defer(thinking=True)
+    # Process the image and hero name as needed
+    if hero_title == "Unknown Hero":
+        payload = {
+            'hero_title': name,
+        }
+        update_url = WORDPRESS_SITE + '/wp-json/heavenhold/v1/add-new-hero'
+        response = requests.post(update_url, data=payload)
+        # Raise an exception if the response contains an error
+        response.raise_for_status()
+        # Send a confirmation message
+        await interaction.followup.send(f"**Hero:** {name} created! Hero lists will update in 2-3 minutes.")
+    else:
+        await interaction.followup.send(f"**Hero:** {name}\nHero already exists.")
 
+bot.run(DISCORD_TOKEN)

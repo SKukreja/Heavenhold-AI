@@ -7,6 +7,7 @@ import io
 import tempfile
 from flask import current_app
 from .app import celery
+from .stat_prompt import stat_prompt
 from .assistant_prompt import system_prompt
 from .hero_query import hero_query
 import requests
@@ -49,6 +50,12 @@ def setup_periodic_tasks(sender, **kwargs):
         60.0,  # Run every 30 seconds (adjust as needed)
         check_and_process_s3_images.s('hero-bios'),
         name="Check 'hero-bios' folder in S3 bucket",
+    )
+
+    sender.add_periodic_task(
+        60.0,  # Run every 30 seconds (adjust as needed)
+        check_and_process_s3_images.s('hero-stats'),
+        name="Check 'hero-stats' folder in S3 bucket",
     )
 
     # Schedule to fetch hero stories data every 10 minutes
@@ -644,6 +651,158 @@ def process_hero_bio_task(key, folder, hero_name):
         logger.exception(f"Error processing image {key} from folder '{folder}':")
 
 @celery.task
+def process_hero_stats_task(key, folder, hero_name):
+    if key == "hero-stats/": return
+    logger.info(f"Processing image: {key} from folder '{folder}' as hero stat information.")
+    try:
+        # Initialize Redis client
+        redis_client = redis.Redis(host='redis-service', port=6379, db=0)
+
+        api_key = current_app.config['OPENAI_API_KEY']
+
+        # Retrieve cached data
+        cached_data = redis_client.get('hero_data')
+        if cached_data is not None:
+            hero_data = json.loads(cached_data)
+            logger.info("Retrieved hero data from cache.")
+
+            # Extract the list of heroes
+            heroes_list = hero_data['data']['heroes']['nodes']
+
+            db_hero_data = None
+
+            # Search for the hero with matching slug
+            for hero in heroes_list:
+                if hero['slug'] == hero_name:
+                    db_hero_data = hero
+                    break
+
+            if db_hero_data is not None:
+                # Now test_hero_data contains the data for the hero named test_hero
+                logger.info(f"Found hero data for {hero_name}")
+                # Proceed with using test_hero_data as needed
+            else:
+                logger.warning(f"Hero '{hero_name}' not found in hero data.")
+                return  # Exit the task if the hero is not found
+
+            # Initialize S3 client using app.config variables
+            s3_client = boto3.client(
+                's3',
+                aws_access_key_id=current_app.config['AWS_ACCESS_KEY_ID'],
+                aws_secret_access_key=current_app.config['AWS_SECRET_ACCESS_KEY'],
+                region_name=current_app.config['AWS_REGION'],
+            )
+
+            # Generate a pre-signed URL for the image
+            bucket_name = current_app.config['AWS_S3_BUCKET']
+            pre_signed_url = s3_client.generate_presigned_url(
+                'get_object',
+                Params={'Bucket': bucket_name, 'Key': key},
+                ExpiresIn=3600  
+            )
+
+            # Prepare the messages
+            messages = [
+                {
+                    "role": "system",
+                    "content": system_prompt,
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": stat_prompt, 
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": pre_signed_url
+                            },
+                        }
+                    ],
+                },
+            ]
+
+            # Prepare the data payload (as JSON)
+            payload = {
+                "model": "gpt-4o",
+                "messages": messages,
+                "max_tokens": 1000,
+            }
+
+            # Set up headers
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}"
+            }
+
+            # Make the API call
+            response = requests.post(
+               "https://api.openai.com/v1/chat/completions",
+               headers=headers,
+               json=payload,
+            )
+
+            # Parse the JSON content
+            response_json = response.json()            
+
+            # Check for errors
+            if 'error' in response_json:
+                logger.error(f"OpenAI API error: {response_json['error']}")
+                return
+
+            # Access the 'choices' data
+            extracted_data = response_json['choices'][0]['message']['content']
+            cleaned_data = extracted_data.strip('```json').strip('```')
+
+            # Log the response JSON
+            logger.info(cleaned_data)
+
+            # Attempt to parse the extracted data as JSON
+            try:                
+                hero_data = json.loads(cleaned_data)
+                logger.info("Successfully processed JSON from AI response")
+                
+                # POST the hero's story and ID to the specified URL
+                update_url = current_app.config['WORDPRESS_SITE'] + '/wp-json/heavenhold/v1/update-stats'
+                payload = {
+                    'hero_id': db_hero_data['databaseId'],
+                    "atk": hero_data['atk'],
+                    "def": hero_data['def'],
+                    "hp": hero_data['hp'],
+                    "crit": hero_data['crit'],
+                    "heal": hero_data['heal'],
+                    "damage_reduction": hero_data['damage_reduction'],
+                    "basic_resistance": hero_data['basic_resistance'],
+                    "light_resistance": hero_data['light_resistance'],
+                    "dark_resistance": hero_data['dark_resistance'],
+                    "fire_resistance": hero_data['fire_resistance'],
+                    "earth_resistance": hero_data['earth_resistance'],
+                    "water_resistance": hero_data['water_resistance'],
+                    "compatible_equipment": hero_data['compatible_equipment'],
+                    "passives": hero_data['passives'],
+                }
+                logger.info(payload)
+                response = requests.post(update_url, json=payload)
+                response.raise_for_status()
+                logger.info("Hero stats updated successfully")
+                
+                # Delete the image after processing (if desired)
+                s3_client.delete_object(Bucket=bucket_name, Key=key)
+                fetch_hero_data.delay()
+                logger.info(f"{key} processed successfully, deleting from S3 bucket.")
+            except json.JSONDecodeError as e:
+                logger.error("Failed to parse JSON from AI response")
+                logger.error(e)
+                # Handle the error accordingly
+        else:
+            logger.warning("Hero data not found in cache")
+
+    except Exception as e:
+        logger.exception(f"Error processing image {key} from folder '{folder}':")
+
+@celery.task
 def check_and_process_s3_images(folder):
     logger.info(f"Checking for new images in S3 bucket folder '{folder}'")
     try:
@@ -666,27 +825,30 @@ def check_and_process_s3_images(folder):
 
             for obj in response['Contents']:
                 key = obj['Key']
-                logger.info(f"Found image: {key}, adding to processing queue.")
-                # Extract hero_name from key
-                filename = key.split('/')[-1]
-                filename_without_extension = filename.split('.')[0]
-                hero_name_parts = filename_without_extension.split('_')
-                if len(hero_name_parts) >= 2:
-                    hero_name = hero_name_parts[0]
-                    if folder == "hero-stories":
-                        process_hero_story_task.delay(key, folder, hero_name)
-                    elif folder == "hero-portraits":
-                        region = hero_name_parts[1]
-                        process_hero_portrait_task.delay(key, folder, hero_name, region)
-                    elif folder == "hero-illustrations":
-                        region = hero_name_parts[1]
-                        process_hero_illustration_task.delay(key, folder, hero_name, region)
-                    elif folder == "hero-bios":                        
-                        process_hero_bio_task.delay(key, folder, hero_name)
+                if key != folder:
+                    logger.info(f"Found image: {key}, adding to processing queue.")
+                    # Extract hero_name from key
+                    filename = key.split('/')[-1]
+                    filename_without_extension = filename.split('.')[0]
+                    hero_name_parts = filename_without_extension.split('_')
+                    if len(hero_name_parts) >= 2:
+                        hero_name = hero_name_parts[0]
+                        if folder == "hero-stories":
+                            process_hero_story_task.delay(key, folder, hero_name)
+                        elif folder == "hero-portraits":
+                            region = hero_name_parts[1]
+                            process_hero_portrait_task.delay(key, folder, hero_name, region)
+                        elif folder == "hero-illustrations":
+                            region = hero_name_parts[1]
+                            process_hero_illustration_task.delay(key, folder, hero_name, region)
+                        elif folder == "hero-bios":                        
+                            process_hero_bio_task.delay(key, folder, hero_name)
+                        elif folder == "hero-stats":                        
+                            process_hero_stats_task.delay(key, folder, hero_name)
+                        else:
+                            process_image_task.delay(key, folder)
                     else:
-                        process_image_task.delay(key, folder)
-                else:
-                    logger.warning(f"Invalid filename format: {filename}. Skipping processing.")
+                        logger.warning(f"Invalid filename format: {filename}. Skipping processing.")
         else:
             logger.info(f"No images found in the S3 bucket folder '{folder}'.")
     except Exception as e:
