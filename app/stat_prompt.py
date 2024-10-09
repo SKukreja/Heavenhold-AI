@@ -4,8 +4,8 @@ Please analyze this image and generate a JSON object containing numerical values
 The possible values you will see under 'Hero Information' are:
 'Atk', 'Def', 'HP', 'Crit', 'Heal', 'Damage Reduction', 'Earth Resistance', 'Fire Resistance', 'Water Resistance', 'Basic Resistance', 'Dark Resistance', 'Light Resistance'. If any are not present, just put 0 for that value.
 
-
 These values and the line items you will see under 'Co-op Expedition' should be combined together into your JSON response. 'Co-op Expedition' lines can be listed under the 'passives' key as an array of boolean, string, and numerical values. 
+
 Your response should be structured as shown below:
 
 {
@@ -67,21 +67,17 @@ Basic Atk
 Heal (Flat)
 Heal (%)
 Atk, Heal [] for injured Chain Skills
-Atk Decrease 100.0% negated
-Atk Decrease 70.0% negated
-Atk Decrease 30.0% negated
-Def Decrease 100.0% negated
-Def Decrease 50.0% negated
-Doom Damage 100.0% negated
-Doom Damage 30.0% negated
-Injury Damage 100.0% negated
-Injury Damage 50.0% negated
+Atk Decrease % negated
+Def Decrease % negated
+Doom Damage % negated
+Injury Damage % negated
 On hit extra damage
 On hit heal allies
 Increase damage to enemies with HP
 Decrease damage taken by % of increased Skill Damage
 Increase damage to tanker Hero
 Crit Hit Multiplier
+When a shield is present, damage dealt increases by x% while damage taken decreases by x%
 
 Respond with only valid JSON using the mentioned structure, and ignore any icons or other irrelevant information. 
 '''

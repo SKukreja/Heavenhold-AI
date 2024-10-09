@@ -1,12 +1,15 @@
+import asyncio
 import logging
 import sys
+import io
 import os
 from typing import Literal
 import uuid
 import discord
 import boto3
+import base64
 import requests
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord import app_commands
 import redis
 import json
@@ -24,9 +27,9 @@ parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
 
-from config import DISCORD_TOKEN, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION, AWS_S3_BUCKET, GUILD_ID, WORDPRESS_SITE
+from config import DISCORD_TOKEN, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION, AWS_S3_BUCKET, GUILD_ID, WORDPRESS_SITE, DISCORD_CHANNEL_ID
 
-intents = discord.Intents.default()
+intents = discord.Intents(members=True, guilds=True)
 intents.message_content = True
 
 # Initialize Redis client
@@ -34,6 +37,9 @@ redis_client = redis.Redis(host='redis-service', port=6379, db=0)
 
 dropdown_options = []
 hero_name_mapping = {}
+
+def decode_base64_to_image(base64_string):
+    return io.BytesIO(base64.b64decode(base64_string))
 
 def fetch_hero_data():
     global dropdown_options, hero_name_mapping
@@ -78,6 +84,107 @@ bot = Lahn()
 @bot.event
 async def on_ready():
     logger.info(f'Logged in as {bot.user}')
+    check_redis_for_messages.start()
+
+@tasks.loop(seconds=10)
+async def check_redis_for_messages():
+    try:
+        message = redis_client.lpop('discord_message_queue')  # Fetch message from Redis queue
+        if message:
+            message_data = json.loads(message)
+            channel_id = int(message_data['channel_id'])                        
+            
+            # Check if it's an embed
+            if message_data.get('is_embed', False):
+                embed_data = message_data['embed']
+                task_id = message_data['task_id']  # Task ID for tracking poll result
+                await send_embed_to_channel(channel_id, embed_data, task_id)
+            else:
+                content = message_data['message']
+                await send_message_to_channel(channel_id, content)
+    except Exception as e:
+        logger.error(f"Error while checking Redis: {e}")
+
+async def send_message_to_channel(channel_id: int, message: str):
+    channel = bot.get_channel(channel_id)
+    if channel:
+        await channel.send(message)
+        logger.info(f"Message sent to channel {channel_id}: {message}")
+    else:
+        logger.error(f"Channel {channel_id} not found")
+
+async def send_embed_to_channel(channel_id: int, embed_data: dict, task_id: str, image: str = None, filename: str = None):
+    channel = bot.get_channel(channel_id)
+    if channel:
+        # **Ensure clearing of the message** after processing
+        redis_client.delete(f"discord_message_queue:{task_id}")
+
+        embed = discord.Embed.from_dict(embed_data)  # Recreate the embed from the dictionary
+        poll_message = await channel.send(embed=embed)
+        logger.info(f"Embed sent to channel {channel_id}, waiting for votes.")
+        
+        # Add reactions for voting
+        await poll_message.add_reaction('✅')
+        await poll_message.add_reaction('❌')
+        
+        # Define a check for valid reactions
+        def check(reaction, user):
+            return user != bot.user and str(reaction.emoji) in ['✅', '❌'] and reaction.message.id == poll_message.id
+
+        # Loop until a reaction is received or the time runs out
+        upvotes = 0
+        downvotes = 0
+        try:
+            while True:
+                reaction, user = await bot.wait_for('reaction_add', timeout=5, check=check)  # Timeout set to 5 seconds to check regularly
+                # Fetch the message to get the updated reactions
+                poll_message = await channel.fetch_message(poll_message.id)
+
+                # Tally the votes after every reaction
+                for react in poll_message.reactions:
+                    if react.emoji == '✅':
+                        upvotes = react.count - 1  # Subtract 1 to exclude the bot's reaction
+                    elif react.emoji == '❌':
+                        downvotes = react.count - 1  # Subtract 1 to exclude the bot's reaction
+
+                # If any reaction received, break the loop immediately
+                if upvotes > 0 or downvotes > 0:
+                    break
+
+        except asyncio.TimeoutError:
+            logger.info(f"No reactions received in time for task {task_id}. Proceeding with final counts.")
+
+        logger.info(f"Poll result for task {task_id}: ✅ {upvotes}, ❌ {downvotes}")
+
+        # Store the result in Redis (for the Celery task to read)
+        poll_result = {
+            'upvotes': upvotes,
+            'downvotes': downvotes
+        }
+        redis_client.set(f"discord_poll_result:{task_id}", json.dumps(poll_result))
+        redis_client.expire(f"discord_poll_result:{task_id}", 60) 
+
+        # Update the embed based on the poll results
+        if upvotes > downvotes:
+            embed.color = discord.Color.green()  # Success
+            embed.set_footer(text="Thanks for confirming! I'll update the site now.")
+        elif downvotes > upvotes:
+            embed.color = discord.Color.red()  # Failure
+            embed.set_footer(text="Okay, I won't update the site then.")
+        elif upvotes == 0 and downvotes == 0:
+            embed.color = discord.Color.orange()  # No confirmation
+            embed.set_footer(text="Confirmation not received, I'll create a revision.")
+
+        if image and filename:
+            # Add the image to the embed
+            image_bytes = decode_base64_to_image(image)
+            discord_file = discord.File(image_bytes, filename=filename)
+            embed.set_image(url=f"attachment://{filename}")
+            await poll_message.edit(embed=embed, file=discord_file)
+        else:            
+            await poll_message.edit(embed=embed)
+    else:
+        logger.error(f"Channel {channel_id} not found")
 
 @bot.command(name="manual_sync_commands", hidden=True)
 @commands.is_owner()
@@ -143,8 +250,20 @@ async def submit_hero_story(interaction: discord.Interaction, hero: str, image: 
         )
         logger.info(f"Uploaded image to S3: {new_filename}")
 
-        # Send a confirmation message
-        await interaction.followup.send(f"**Hero:** {hero_title}\nStory image uploaded successfully! Revision will be added to queue in 2-3 minutes.")
+        # Prepare the embed
+        embed = discord.Embed(
+            title="Hero Story Uploaded",
+            description=f"**Hero:** {hero_title}\nStory image uploaded successfully!"
+        )
+
+        embed.color = discord.Color.green()
+
+        # Attach the image directly to the Discord message and add it to the embed
+        discord_file = discord.File(io.BytesIO(file_content), filename=filename)
+        embed.set_image(url=f"attachment://{filename}")
+
+        # Send the embed with the attached image
+        await interaction.followup.send(embed=embed, file=discord_file)
 
 # Autocomplete function for hero
 @submit_hero_story.autocomplete('hero')
@@ -199,8 +318,20 @@ async def submit_hero_portrait(interaction: discord.Interaction, hero: str, imag
         )
         logger.info(f"Uploaded image to S3: {new_filename}")
 
-        # Send a confirmation message
-        await interaction.followup.send(f"**Hero:** {hero_title}\n**Region:** {region}\nPortrait image uploaded successfully! Revision will be added to queue in 2-3 minutes.")
+        # Send a confirmation message with the image
+        embed = discord.Embed(
+            title="Hero Portrait Uploaded",
+            description=f"**Hero:** {hero_title}\nPortrait image uploaded successfully!"
+        )
+
+        embed.color = discord.Color.green()
+
+        # Attach the image directly to the Discord message and add it to the embed
+        discord_file = discord.File(io.BytesIO(file_content), filename=filename)
+        embed.set_image(url=f"attachment://{filename}")
+
+        # Send the embed with the attached image
+        await interaction.followup.send(embed=embed, file=discord_file)
 
 # Autocomplete function for hero
 @submit_hero_portrait.autocomplete('hero')
@@ -255,8 +386,20 @@ async def submit_hero_bio(interaction: discord.Interaction, hero: str, image: di
         )
         logger.info(f"Uploaded image to S3: {new_filename}")
 
-        # Send a confirmation message
-        await interaction.followup.send(f"**Hero:** {hero_title}\nBio image uploaded successfully! Revision will be added to queue in 2-3 minutes.")
+        # Prepare the embed
+        embed = discord.Embed(
+            title="Hero Bio Uploaded",
+            description=f"**Hero:** {hero_title}\nBio image uploaded successfully!"
+        )
+
+        embed.color = discord.Color.green()
+
+        # Attach the image directly to the Discord message and add it to the embed
+        discord_file = discord.File(io.BytesIO(file_content), filename=filename)
+        embed.set_image(url=f"attachment://{filename}")
+
+        # Send the embed with the attached image
+        await interaction.followup.send(embed=embed, file=discord_file)
 
 # Autocomplete function for hero
 @submit_hero_bio.autocomplete('hero')
@@ -277,7 +420,6 @@ async def bio_hero_name_autocomplete(interaction: discord.Interaction, current: 
                 break
     return suggestions
 
-# Define the slash command
 @app_commands.command(name="submit_hero_stats", description="Upload an image with a hero's level 100 stats to update the site.")
 @app_commands.describe(hero="Select a hero", image="Attach an image")
 async def submit_hero_stats(interaction: discord.Interaction, hero: str, image: discord.Attachment):
@@ -285,7 +427,7 @@ async def submit_hero_stats(interaction: discord.Interaction, hero: str, image: 
     hero_title = hero_name_mapping.get(hero, "Unknown Hero")
     # Acknowledge the interaction
     await interaction.response.defer(thinking=True)
-    # Process the image and hero name as needed
+    
     if image is not None:
         filename = image.filename
         file_content = await image.read()
@@ -297,7 +439,7 @@ async def submit_hero_stats(interaction: discord.Interaction, hero: str, image: 
         file_extension = os.path.splitext(filename)[1]
         new_filename = f"{hero}_{guid}{file_extension}"
 
-        # Upload the image to S3
+        # Upload the image to S3 (optional, if you still want it for storage)
         s3_client = boto3.client(
             's3',
             aws_access_key_id=AWS_ACCESS_KEY_ID,
@@ -311,8 +453,20 @@ async def submit_hero_stats(interaction: discord.Interaction, hero: str, image: 
         )
         logger.info(f"Uploaded image to S3: {new_filename}")
 
-        # Send a confirmation message
-        await interaction.followup.send(f"**Hero:** {hero_title}\nStats image uploaded successfully! Revision will be added to queue in 2-3 minutes.")
+        # Prepare the embed
+        embed = discord.Embed(
+            title="Hero Stats Uploaded",
+            description=f"**Hero:** {hero_title}\nStats image uploaded successfully!"
+        )
+
+        embed.color = discord.Color.green()
+
+        # Attach the image directly to the Discord message and add it to the embed
+        discord_file = discord.File(io.BytesIO(file_content), filename=filename)
+        embed.set_image(url=f"attachment://{filename}")
+
+        # Send the embed with the attached image
+        await interaction.followup.send(embed=embed, file=discord_file)
 
 # Autocomplete function for hero
 @submit_hero_stats.autocomplete('hero')
@@ -367,8 +521,20 @@ async def submit_hero_illustration(interaction: discord.Interaction, hero: str, 
         )
         logger.info(f"Uploaded image to S3: {new_filename}")
 
-        # Send a confirmation message
-        await interaction.followup.send(f"**Hero:** {hero_title}\n**Region:** {region}\nIllustration image uploaded successfully! Revision will be added to queue in 2-3 minutes.")
+        # Prepare the embed
+        embed = discord.Embed(
+            title="Hero Illustration Uploaded",
+            description=f"**Hero:** {hero_title}\nIllustration image uploaded successfully!"
+        )
+
+        embed.color = discord.Color.green()
+
+        # Attach the image directly to the Discord message and add it to the embed
+        discord_file = discord.File(io.BytesIO(file_content), filename=filename)
+        embed.set_image(url=f"attachment://{filename}")
+
+        # Send the embed with the attached image
+        await interaction.followup.send(embed=embed, file=discord_file)
 
 # Autocomplete function for hero
 @submit_hero_illustration.autocomplete('hero')
