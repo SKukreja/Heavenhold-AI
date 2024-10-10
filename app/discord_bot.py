@@ -29,7 +29,10 @@ if parent_dir not in sys.path:
 
 from config import DISCORD_TOKEN, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION, AWS_S3_BUCKET, GUILD_ID, WORDPRESS_SITE, DISCORD_CHANNEL_ID
 
-intents = discord.Intents(members=True, guilds=True)
+intents = discord.Intents.default()
+intents.members = True
+intents.guilds = True
+intents.reactions = True
 intents.message_content = True
 
 # Initialize Redis client
@@ -37,6 +40,7 @@ redis_client = redis.Redis(host='redis-service', port=6379, db=0)
 
 dropdown_options = []
 hero_name_mapping = {}
+waiting_polls = {}
 
 def decode_base64_to_image(base64_string):
     return io.BytesIO(base64.b64decode(base64_string))
@@ -113,78 +117,88 @@ async def send_message_to_channel(channel_id: int, message: str):
     else:
         logger.error(f"Channel {channel_id} not found")
 
+# Global variables to store upvotes and downvotes for specific tasks
+vote_counts = {}
+
+@bot.event
+async def on_reaction_add(reaction, user):
+    # Ignore the bot's own reactions
+    if user == bot.user:
+        return
+
+    message_id = reaction.message.id
+
+    if message_id in waiting_polls:
+        poll_info = waiting_polls[message_id]
+        if reaction.emoji == '✅':
+            poll_info['upvotes'] += 1
+        elif reaction.emoji == '❌':
+            poll_info['downvotes'] += 1
+
+        logger.info(f"Reaction added: {reaction.emoji} by {user.name}, updated votes: ✅ {poll_info['upvotes']}, ❌ {poll_info['downvotes']}")
+
+        # If at least one reaction received, set the future result to proceed
+        if not poll_info['future'].done():
+            poll_info['future'].set_result(None)
+
 async def send_embed_to_channel(channel_id: int, embed_data: dict, task_id: str, image: str = None, filename: str = None):
     channel = bot.get_channel(channel_id)
     if channel:
-        # **Ensure clearing of the message** after processing
         redis_client.delete(f"discord_message_queue:{task_id}")
-
-        embed = discord.Embed.from_dict(embed_data)  # Recreate the embed from the dictionary
-        poll_message = await channel.send(embed=embed)
-        logger.info(f"Embed sent to channel {channel_id}, waiting for votes.")
-        
-        # Add reactions for voting
-        await poll_message.add_reaction('✅')
-        await poll_message.add_reaction('❌')
-        
-        # Define a check for valid reactions
-        def check(reaction, user):
-            return user != bot.user and str(reaction.emoji) in ['✅', '❌'] and reaction.message.id == poll_message.id
-
-        # Loop until a reaction is received or the time runs out
-        upvotes = 0
-        downvotes = 0
-        try:
-            while True:
-                reaction, user = await bot.wait_for('reaction_add', timeout=5, check=check)  # Timeout set to 5 seconds to check regularly
-                # Fetch the message to get the updated reactions
-                poll_message = await channel.fetch_message(poll_message.id)
-
-                # Tally the votes after every reaction
-                for react in poll_message.reactions:
-                    if react.emoji == '✅':
-                        upvotes = react.count - 1  # Subtract 1 to exclude the bot's reaction
-                    elif react.emoji == '❌':
-                        downvotes = react.count - 1  # Subtract 1 to exclude the bot's reaction
-
-                # If any reaction received, break the loop immediately
-                if upvotes > 0 or downvotes > 0:
-                    break
-
-        except asyncio.TimeoutError:
-            logger.info(f"No reactions received in time for task {task_id}. Proceeding with final counts.")
-
-        logger.info(f"Poll result for task {task_id}: ✅ {upvotes}, ❌ {downvotes}")
-
-        # Store the result in Redis (for the Celery task to read)
-        poll_result = {
-            'upvotes': upvotes,
-            'downvotes': downvotes
-        }
-        redis_client.set(f"discord_poll_result:{task_id}", json.dumps(poll_result))
-        redis_client.expire(f"discord_poll_result:{task_id}", 60) 
-
-        # Update the embed based on the poll results
-        if upvotes > downvotes:
-            embed.color = discord.Color.green()  # Success
-            embed.set_footer(text="Thanks for confirming! I'll update the site now.")
-        elif downvotes > upvotes:
-            embed.color = discord.Color.red()  # Failure
-            embed.set_footer(text="Okay, I won't update the site then.")
-        elif upvotes == 0 and downvotes == 0:
-            embed.color = discord.Color.orange()  # No confirmation
-            embed.set_footer(text="Confirmation not received, I'll create a revision.")
+        embed = discord.Embed.from_dict(embed_data)
 
         if image and filename:
-            # Add the image to the embed
             image_bytes = decode_base64_to_image(image)
             discord_file = discord.File(image_bytes, filename=filename)
             embed.set_image(url=f"attachment://{filename}")
-            await poll_message.edit(embed=embed, file=discord_file)
-        else:            
+            poll_message = await channel.send(embed=embed, file=discord_file)
+        else:
+            poll_message = await channel.send(embed=embed)
+
+        await poll_message.add_reaction('✅')
+        await poll_message.add_reaction('❌')
+
+        # Create a future to wait for reactions
+        future = asyncio.Future()
+        # Store the future and counts in waiting_polls
+        waiting_polls[poll_message.id] = {'future': future, 'upvotes': 0, 'downvotes': 0, 'task_id': task_id}
+
+        try:
+            # Wait for the future to be set
+            await asyncio.wait_for(future, timeout=60.0)
+        except asyncio.TimeoutError:
+            logger.info(f"Reaction timeout reached for message ID {poll_message.id}")
+        finally:
+            # Retrieve vote counts
+            poll_info = waiting_polls.pop(poll_message.id, None)
+            if poll_info:
+                upvotes = poll_info['upvotes']
+                downvotes = poll_info['downvotes']
+            else:
+                upvotes = downvotes = 0
+
+            poll_result = {
+                'upvotes': upvotes,
+                'downvotes': downvotes
+            }
+            redis_client.set(f"discord_poll_result:{task_id}", json.dumps(poll_result))
+            redis_client.expire(f"discord_poll_result:{task_id}", 60)
+
+            # Update the embed based on poll results
+            if upvotes > downvotes:
+                embed.color = discord.Color.green()
+                embed.set_footer(text="Thanks for confirming! I'll update the site now.")
+            elif downvotes > upvotes:
+                embed.color = discord.Color.red()
+                embed.set_footer(text="Okay, I won't update the site then.")
+            else:
+                embed.color = discord.Color.orange()
+                embed.set_footer(text="No confirmation received, I'll create a revision.")
+
             await poll_message.edit(embed=embed)
     else:
         logger.error(f"Channel {channel_id} not found")
+
 
 @bot.command(name="manual_sync_commands", hidden=True)
 @commands.is_owner()
