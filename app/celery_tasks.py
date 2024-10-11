@@ -219,6 +219,9 @@ def process_hero_story_task(key, folder, hero_name):
                 "color": 3447003,                
                 "footer": {"text": "Does this look correct?"}
             }
+
+            # Remove any None fields (in case some stats are not present)
+            embed_data["fields"] = [field for field in embed_data["fields"] if field]
             
             # Send poll request to Discord through Redis
             poll_data = {
@@ -271,18 +274,13 @@ def process_hero_story_task(key, folder, hero_name):
             # Delete the image after processing (if desired)
             s3_client.delete_object(Bucket=bucket_name, Key=key)            
             logger.info(f"{key} processed successfully, deleting from S3 bucket.")
-        # Add the image to processed_images set
-            redis_client.sadd('processed_images', key)
-            # Delete the retry count
-            redis_client.delete('image_retry_count:' + key)
         except json.JSONDecodeError as e:
             logger.error("Failed to parse JSON from AI response")
             logger.error(e)
-            # Increment the retry count
-            redis_client.incr('image_retry_count:' + key)
+            # Handle the error accordingly
+
     except Exception as e:
         logger.exception(f"Error processing image {key} from folder '{folder}':")
-        redis_client.incr('image_retry_count:' + key)
 
 @celery.task
 def process_hero_portrait_task(key, folder, hero_name, region):
@@ -346,6 +344,7 @@ def process_hero_portrait_task(key, folder, hero_name, region):
             cropped_img.save(img_byte_arr, format='JPEG')
             img_byte_arr.seek(0)
             image_bytes = img_byte_arr.read()
+
             # POST the image 
             try:                
                 logger.info("Successfully cropped portrait image")
@@ -429,18 +428,13 @@ def process_hero_portrait_task(key, folder, hero_name, region):
                 s3_client.delete_object(Bucket=current_app.config['AWS_S3_BUCKET'], Key=key)                    
                 fetch_hero_data.delay()
                 logger.info(f"{key} processed successfully, deleting from S3 bucket.")
-                # Add the image to processed_images set
-                redis_client.sadd('processed_images', key)
-                # Delete the retry count
-                redis_client.delete('image_retry_count:' + key)
             except json.JSONDecodeError as e:
                 logger.error("Failed to parse JSON from AI response")
                 logger.error(e)
-                # Increment the retry count
-                redis_client.incr('image_retry_count:' + key)
+                # Handle the error accordingly
+
     except Exception as e:
         logger.exception(f"Error processing image {key} from folder '{folder}':")
-        redis_client.incr('image_retry_count:' + key)
 
 @celery.task
 def process_hero_illustration_task(key, folder, hero_name, region):
@@ -654,18 +648,13 @@ def process_hero_illustration_task(key, folder, hero_name, region):
                 # Optionally delete the image after processing
                 s3_client.delete_object(Bucket=current_app.config['AWS_S3_BUCKET'], Key=key)
                 logger.info(f"{key} processed successfully, deleting from S3 bucket.")
-                # Add the image to processed_images set
-                redis_client.sadd('processed_images', key)
-                # Delete the retry count
-                redis_client.delete('image_retry_count:' + key)
             except json.JSONDecodeError as e:
                 logger.error("Failed to parse JSON from AI response")
                 logger.error(e)
-                # Increment the retry count
-                redis_client.incr('image_retry_count:' + key)
+                # Handle the error accordingly
+
     except Exception as e:
         logger.exception(f"Error processing image {key} from folder '{folder}':")
-        redis_client.incr('image_retry_count:' + key)
 
 @celery.task
 def process_hero_bio_task(key, folder, hero_name):
@@ -851,19 +840,13 @@ def process_hero_bio_task(key, folder, hero_name):
             # Delete the image after processing (if desired)
             s3_client.delete_object(Bucket=bucket_name, Key=key)
             logger.info(f"{key} processed successfully, deleting from S3 bucket.")
-            # Add the image to processed_images set
-            redis_client.sadd('processed_images', key)
-            # Delete the retry count
-            redis_client.delete('image_retry_count:' + key)
         except json.JSONDecodeError as e:
             logger.error("Failed to parse JSON from AI response")
             logger.error(e)
-            # Increment the retry count
-            redis_client.incr('image_retry_count:' + key)
+            # Handle the error accordingly
 
     except Exception as e:
         logger.exception(f"Error processing image {key} from folder '{folder}':")
-        redis_client.incr('image_retry_count:' + key)
 
 @celery.task
 def process_hero_stats_task(key, folder, hero_name):
@@ -948,16 +931,13 @@ def process_hero_stats_task(key, folder, hero_name):
         extracted_data = response_json['choices'][0]['message']['content']
         cleaned_data = extracted_data.strip('```json').strip('```')
 
-        hero_stats = {}
         # Attempt to parse the extracted data as JSON
         try:
             hero_stats = json.loads(cleaned_data)
             logger.info("Successfully processed JSON from AI response")
         except json.JSONDecodeError as e:
-            logger.error("Failed to parse JSON from AI response")
-            logger.error(e)
-            # Increment the retry count
-            redis_client.incr('image_retry_count:' + key)
+            logger.error(f"Failed to parse JSON: {e}")
+            return
 
         # Example payload for hero stats from AI response
         payload = {
@@ -1088,20 +1068,13 @@ def process_hero_stats_task(key, folder, hero_name):
         # Delete the image after processing (if desired)
         s3_client.delete_object(Bucket=bucket_name, Key=key)
         logger.info(f"{key} processed successfully, deleting from S3 bucket.")
-        # Add the image to processed_images set
-        redis_client.sadd('processed_images', key)
-        # Delete the retry count
-        redis_client.delete('image_retry_count:' + key)
     except Exception as e:
-        logger.exception(f"Error processing image {key} from folder '{folder}':")
-        # Increment the retry count
-        redis_client.incr('image_retry_count:' + key)
+        logger.exception(f"Error processing hero stats: {e}")
 
 @celery.task
 def check_and_process_s3_images(folder):
-    logger.info(f"Checking for new images in S3 bucket folder '{folder}'")
+    # logger.info(f"Checking for new images in S3 bucket folder '{folder}'")
     try:
-
         # Initialize S3 client using app.config variables
         s3_client = boto3.client(
             's3',
@@ -1117,30 +1090,16 @@ def check_and_process_s3_images(folder):
         )
 
         if 'Contents' in response:
-            if len(response['Contents']) > 1:
-                logger.info(f"Found {len(response['Contents'])} items in S3 bucket folder '{folder}'.")
+            # if len(response['Contents']) > 1:  logger.info(f"Found {len(response['Contents'])} items in S3 bucket folder '{folder}'.")
 
             for obj in response['Contents']:
                 key = obj['Key']
                 if key != folder + '/':
-                    # Rate limit: Process at most one image per minute
-                    if redis_client.exists('image_processing_lock'):
-                        return
-                    else:
-                        # Set the lock with expiration of 60 seconds
-                        redis_client.set('image_processing_lock', '1', ex=20)
-                        logger.info(f"Rate limit reached, waiting 20 seconds.")
-
-                    # Get the retry count for the image
-                    retry_count = int(redis_client.get('image_retry_count:' + key) or 0)
-                    if retry_count >= 3:
-                        # Delete the image from S3
-                        s3_client.delete_object(Bucket=current_app.config['AWS_S3_BUCKET'], Key=key)
-                        redis_client.delete('image_retry_count:' + key)
-                        logger.info(f"Image {key} has reached max retries. Deleting from S3.")
+                    # Check if the image has already been processed
+                    if redis_client.sismember('processed_images', key):
+                        logger.info(f"Image {key} has already been processed. Skipping processing.")
                         continue
 
-                    # Process the image
                     logger.info(f"Found image: {key}, adding to processing queue.")
                     # Extract hero_name from key
                     filename = key.split('/')[-1]
@@ -1163,8 +1122,8 @@ def check_and_process_s3_images(folder):
                         else:
                             process_image_task.delay(key, folder)
                         
-                        # Break after processing one image
-                        break
+                        # Add the processed image to a set in Redis
+                        redis_client.sadd('processed_images', key)
                     elif filename != '':
                         logger.warning(f"Invalid filename format: {filename}. Skipping processing.")
         else:

@@ -2,6 +2,7 @@ import asyncio
 import logging
 import sys
 import io
+from io import BytesIO
 import os
 from typing import Literal
 import uuid
@@ -102,7 +103,9 @@ async def check_redis_for_messages():
             if message_data.get('is_embed', False):
                 embed_data = message_data['embed']
                 task_id = message_data['task_id']  # Task ID for tracking poll result
-                await send_embed_to_channel(channel_id, embed_data, task_id)
+                image = message_data.get('image', None)
+                filename = message_data.get('filename', None)
+                await send_embed_to_channel(channel_id, embed_data, task_id, image=image, filename=filename)
             else:
                 content = message_data['message']
                 await send_message_to_channel(channel_id, content)
@@ -143,62 +146,108 @@ async def on_reaction_add(reaction, user):
 
 async def send_embed_to_channel(channel_id: int, embed_data: dict, task_id: str, image: str = None, filename: str = None):
     channel = bot.get_channel(channel_id)
-    if channel:
-        redis_client.delete(f"discord_message_queue:{task_id}")
-        embed = discord.Embed.from_dict(embed_data)
-
-        if image and filename:
-            image_bytes = decode_base64_to_image(image)
-            discord_file = discord.File(image_bytes, filename=filename)
-            embed.set_image(url=f"attachment://{filename}")
-            poll_message = await channel.send(embed=embed, file=discord_file)
-        else:
-            poll_message = await channel.send(embed=embed)
-
-        await poll_message.add_reaction('✅')
-        await poll_message.add_reaction('❌')
-
-        # Create a future to wait for reactions
-        future = asyncio.Future()
-        # Store the future and counts in waiting_polls
-        waiting_polls[poll_message.id] = {'future': future, 'upvotes': 0, 'downvotes': 0, 'task_id': task_id}
-
-        try:
-            # Wait for the future to be set
-            await asyncio.wait_for(future, timeout=60.0)
-        except asyncio.TimeoutError:
-            logger.info(f"Reaction timeout reached for message ID {poll_message.id}")
-        finally:
-            # Retrieve vote counts
-            poll_info = waiting_polls.pop(poll_message.id, None)
-            if poll_info:
-                upvotes = poll_info['upvotes']
-                downvotes = poll_info['downvotes']
-            else:
-                upvotes = downvotes = 0
-
-            poll_result = {
-                'upvotes': upvotes,
-                'downvotes': downvotes
-            }
-            redis_client.set(f"discord_poll_result:{task_id}", json.dumps(poll_result))
-            redis_client.expire(f"discord_poll_result:{task_id}", 60)
-
-            # Update the embed based on poll results
-            if upvotes > downvotes:
-                embed.color = discord.Color.green()
-                embed.set_footer(text="Thanks for confirming! I'll update the site now.")
-            elif downvotes > upvotes:
-                embed.color = discord.Color.red()
-                embed.set_footer(text="Okay, I won't update the site then.")
-            else:
-                embed.color = discord.Color.orange()
-                embed.set_footer(text="No confirmation received, I'll create a revision.")
-
-            await poll_message.edit(embed=embed)
-    else:
+    if not channel:
         logger.error(f"Channel {channel_id} not found")
+        return
 
+    redis_client.delete(f"discord_message_queue:{task_id}")
+    embed = discord.Embed.from_dict(embed_data)
+
+    if image and filename:
+        # Validate and decode the base64 image
+        from io import BytesIO
+        import base64
+
+        # Ensure the filename has the correct extension
+        valid_extensions = ('.png', '.jpg', '.jpeg', '.gif')
+        if not filename.lower().endswith(valid_extensions):
+            filename += '.png'  # Default to .png if no valid extension
+
+        # Decode the base64 image
+        try:
+            if ',' in image:
+                image = image.split(',')[1]  # Remove data URI scheme if present
+            image_data = base64.b64decode(image)
+            image_bytes = BytesIO(image_data)
+            image_bytes.seek(0)
+            image_size = image_bytes.getbuffer().nbytes
+            logger.debug(f"Image size: {image_size} bytes")
+
+            if image_size == 0:
+                logger.error("Decoded image is empty.")
+                return
+
+            if image_size > 8000000:  # 8 MB limit
+                logger.error("Image size exceeds Discord's limit of 8 MB.")
+                poll_message = await channel.send(embed=embed)
+                logger.debug("Message sent successfully with embed only.")
+                return
+
+        except Exception as e:
+            logger.error(f"Failed to decode base64 image: {e}")
+            return
+
+        # Create the Discord file and set the image in the embed
+        discord_file = discord.File(fp=image_bytes, filename=filename)
+        embed.set_image(url=f"attachment://{filename}")
+        logger.debug(f"Embed image URL set to: attachment://{filename}")
+
+        # Send the message with the embed and the file
+        try:
+            poll_message = await channel.send(embed=embed, file=discord_file)
+            logger.debug("Message sent successfully with embed and image.")
+        except Exception as e:
+            logger.error(f"Failed to send message: {e}")
+            return
+    else:
+        try:
+            poll_message = await channel.send(embed=embed)
+            logger.debug("Message sent successfully with embed only.")
+        except Exception as e:
+            logger.error(f"Failed to send message: {e}")
+            return
+
+    await poll_message.add_reaction('✅')
+    await poll_message.add_reaction('❌')
+
+    # Create a future to wait for reactions
+    future = asyncio.Future()
+    # Store the future and counts in waiting_polls
+    waiting_polls[poll_message.id] = {'future': future, 'upvotes': 0, 'downvotes': 0, 'task_id': task_id}
+
+    try:
+        # Wait for the future to be set
+        await asyncio.wait_for(future, timeout=60.0)
+    except asyncio.TimeoutError:
+        logger.info(f"Reaction timeout reached for message ID {poll_message.id}")
+    finally:
+        # Retrieve vote counts
+        poll_info = waiting_polls.pop(poll_message.id, None)
+        if poll_info:
+            upvotes = poll_info['upvotes']
+            downvotes = poll_info['downvotes']
+        else:
+            upvotes = downvotes = 0
+
+        poll_result = {
+            'upvotes': upvotes,
+            'downvotes': downvotes
+        }
+        redis_client.set(f"discord_poll_result:{task_id}", json.dumps(poll_result))
+        redis_client.expire(f"discord_poll_result:{task_id}", 60)
+
+        # Update the embed based on poll results
+        if upvotes > downvotes:
+            embed.color = discord.Color.green()
+            embed.set_footer(text="Thanks for confirming! I'll update the site now.")
+        elif downvotes > upvotes:
+            embed.color = discord.Color.red()
+            embed.set_footer(text="Okay, I won't update the site then.")
+        else:
+            embed.color = discord.Color.orange()
+            embed.set_footer(text="No confirmation received, I'll create a revision.")
+
+        await poll_message.edit(embed=embed)
 
 @bot.command(name="manual_sync_commands", hidden=True)
 @commands.is_owner()
@@ -571,23 +620,24 @@ async def illustration_hero_name_autocomplete(interaction: discord.Interaction, 
 
 # Define the slash command
 @app_commands.command(name="add_new_hero", description="Add a new blank hero to the site.")
-@app_commands.describe(name="Enter the hero's full name (with title)")
-async def add_new_hero(interaction: discord.Interaction, name: str):
+@app_commands.describe(title="Enter the hero's title (Example: 'Super Death Destroyer')", name="Enter the hero's name (Example: 'Bob')")
+async def add_new_hero(interaction: discord.Interaction, title: str, name: str):
     # Get the hero title from the slug
-    hero_title = hero_name_mapping.get(name, "Unknown Hero")
+    hero_title = hero_name_mapping.get(title + ' ' + name, "Unknown Hero")
     # Acknowledge the interaction
     await interaction.response.defer(thinking=True)
     # Process the image and hero name as needed
     if hero_title == "Unknown Hero":
         payload = {
-            'hero_title': name,
+            'hero_title': title + ' ' + name,
+            'hero_name': name,            
         }
         update_url = WORDPRESS_SITE + '/wp-json/heavenhold/v1/add-new-hero'
         response = requests.post(update_url, data=payload)
         # Raise an exception if the response contains an error
         response.raise_for_status()
         # Send a confirmation message
-        await interaction.followup.send(f"**Hero:** {name} created! Hero lists will update in 2-3 minutes.")
+        await interaction.followup.send(f"**Hero:** {name} created! Please allow 2-3 minutes for lists to update.")
     else:
         await interaction.followup.send(f"**Hero:** {name}\nHero already exists.")
 
