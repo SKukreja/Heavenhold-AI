@@ -9,6 +9,7 @@ import uuid
 import discord
 import boto3
 import base64
+from PIL import Image
 import requests
 from discord.ext import commands, tasks
 from discord import app_commands
@@ -153,20 +154,23 @@ async def send_embed_to_channel(channel_id: int, embed_data: dict, task_id: str,
     redis_client.delete(f"discord_message_queue:{task_id}")
     embed = discord.Embed.from_dict(embed_data)
 
-    if image and filename:
-        # Validate and decode the base64 image
-        from io import BytesIO
-        import base64
+    if image:
+        if not filename:
+            filename = 'default_image.png'  # Set a default filename
 
         # Ensure the filename has the correct extension
         valid_extensions = ('.png', '.jpg', '.jpeg', '.gif')
         if not filename.lower().endswith(valid_extensions):
             filename += '.png'  # Default to .png if no valid extension
 
+        image_bytes = None
+
         # Decode the base64 image
         try:
+            # Remove data URI scheme if present
             if ',' in image:
-                image = image.split(',')[1]  # Remove data URI scheme if present
+                image = image.split(',')[1]
+
             image_data = base64.b64decode(image)
             image_bytes = BytesIO(image_data)
             image_bytes.seek(0)
@@ -178,13 +182,47 @@ async def send_embed_to_channel(channel_id: int, embed_data: dict, task_id: str,
                 return
 
             if image_size > 8000000:  # 8 MB limit
-                logger.error("Image size exceeds Discord's limit of 8 MB.")
-                poll_message = await channel.send(embed=embed)
-                logger.debug("Message sent successfully with embed only.")
-                return
+                logger.warning("Image size exceeds Discord's limit of 8 MB. Resizing and compressing the image.")
+
+                # Open the image using Pillow
+                img = Image.open(image_bytes)
+
+                # Resize the image if it's too large, keeping aspect ratio
+                max_size = (1800, 1800)
+                img.thumbnail(max_size, Image.LANCZOS)  # Use LANCZOS for high-quality downsampling
+
+                # Save the resized image into BytesIO with compression
+                compressed_image = BytesIO()
+                img_format = img.format if img.format else 'PNG'  # Default to 'PNG' if format is None
+                save_kwargs = {'format': img_format}
+
+                # Adjust compression settings based on format
+                if img_format in ['JPEG', 'JPG']:
+                    save_kwargs['quality'] = 85
+                    save_kwargs['optimize'] = True
+                elif img_format == 'PNG':
+                    save_kwargs['optimize'] = True
+                    save_kwargs['compress_level'] = 9
+
+                img.save(compressed_image, **save_kwargs)
+                compressed_image.seek(0)
+
+                # Update the image data
+                compressed_image_size = compressed_image.getbuffer().nbytes
+                logger.debug(f"Compressed image size: {compressed_image_size} bytes")
+
+                if compressed_image_size > 8000000:
+                    logger.error("Compressed image still exceeds 8 MB after resizing and compression.")
+                    await channel.send("The image is too large to send, even after compression. Please use a smaller image.")
+                    return
+
+                image_bytes = compressed_image
+            else:
+                # Image size is within the limit; no need to resize
+                pass
 
         except Exception as e:
-            logger.error(f"Failed to decode base64 image: {e}")
+            logger.error(f"Failed to decode or process base64 image: {e}")
             return
 
         # Create the Discord file and set the image in the embed

@@ -8,14 +8,16 @@ import base64
 import io
 import tempfile
 from flask import current_app
-from .app import celery
+from .app import celery, bucket_name, boto3_config, api_key
 from .stat_prompt import stat_prompt
 from .assistant_prompt import system_prompt
 from .hero_query import hero_query
 import requests
 import json
 import redis
+from celery import Task
 import numpy as np
+import threading
 from PIL import Image
 
 # Configure logging
@@ -27,6 +29,39 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 redis_client = redis.Redis(host='redis-service', port=6379, db=0)
+
+def make_api_call_with_backoff(url, headers, payload, max_retries=10, backoff_factor=1, max_delay=600):
+    delay = backoff_factor
+    last_exception = None
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(url, headers=headers, json=payload)
+            response.raise_for_status()
+            return response
+        except requests.exceptions.HTTPError as e:
+            last_exception = e
+            response = e.response
+            if response.status_code == 429:
+                # Rate limit exceeded
+                # Get the 'Retry-After' header if present
+                retry_after = response.headers.get('Retry-After')
+                if retry_after:
+                    delay = int(retry_after)
+                else:
+                    delay = min(delay * 8, max_delay)  # Exponential backoff
+                logger.warning(f"Rate limit exceeded. Retrying in {delay} seconds.")
+                time.sleep(delay)
+            else:
+                # Other HTTP errors
+                logger.error(f"HTTP error occurred: {e}")
+                logger.error(f"Response content: {response.text}")
+                raise
+        except requests.exceptions.RequestException as e:
+            # Network errors
+            logger.error(f"Network error occurred: {e}")
+            raise
+    logger.error("Max retries exceeded")
+    raise last_exception if last_exception else Exception("Max retries exceeded")
 
 # Set up periodic tasks
 @celery.on_after_finalize.connect
@@ -113,16 +148,20 @@ def fetch_hero_data():
     except Exception as e:
         logger.exception("Error fetching hero data:")
 
-@celery.task
-def process_hero_story_task(key, folder, hero_name):
+@celery.task(bind=True)
+def process_hero_story_task(self, key, folder, hero_name):
     if key == "hero-stories/": return
-    logger.info(f"Processing image: {key} from folder '{folder}' as a hero story")
-
+    global redis_client, bucket_name, boto3_config, api_key
+    attempt_count = int(redis_client.get('attempts:' + key) or 0)
+    # Check the attempt count    
+    if attempt_count >= 3:
+        logger.info(f"Image {key} has reached maximum attempts. Deleting image.")
+        s3_client.delete_object(Bucket=bucket_name, Key=key)
+        redis_client.delete('attempts:' + key)
+        redis_client.delete('lock:' + key)
+        return
+    logger.info(f"Processing image: {key} from folder '{folder}' as a hero story (attempt {attempt_count + 1})")     
     try:
-        # Initialize Redis client
-        global redis_client
-        api_key = current_app.config['OPENAI_API_KEY']
-
         # Retrieve cached data
         cached_data = redis_client.get('hero_data')
         if cached_data is None:
@@ -135,17 +174,10 @@ def process_hero_story_task(key, folder, hero_name):
         if hero is None:
             logger.warning(f"Hero '{hero_name}' not found.")
             return
+        
+        s3_client = boto3.client('s3', **boto3_config)
 
-        # Initialize S3 client using app.config variables
-        s3_client = boto3.client(
-            's3',
-            aws_access_key_id=current_app.config['AWS_ACCESS_KEY_ID'],
-            aws_secret_access_key=current_app.config['AWS_SECRET_ACCESS_KEY'],
-            region_name=current_app.config['AWS_REGION'],
-        )
-
-        # Generate a pre-signed URL for the image
-        bucket_name = current_app.config['AWS_S3_BUCKET']
+        # Generate a pre-signed URL for the image       
         pre_signed_url = s3_client.generate_presigned_url(
             'get_object',
             Params={'Bucket': bucket_name, 'Key': key},
@@ -174,6 +206,7 @@ def process_hero_story_task(key, folder, hero_name):
                 ],
             },
         ]
+
         # Prepare the data payload (as JSON)
         payload = {
             "model": "gpt-4o",
@@ -188,10 +221,10 @@ def process_hero_story_task(key, folder, hero_name):
         }
 
         # Make the API call
-        response = requests.post(
+        response = make_api_call_with_backoff(
             "https://api.openai.com/v1/chat/completions",
-            headers=headers,
-            json=payload,
+            headers,
+            payload
         )
 
         # Parse the JSON content
@@ -272,26 +305,40 @@ def process_hero_story_task(key, folder, hero_name):
                 logger.info(f"Aborting story update for {hero['title']}")
 
             # Delete the image after processing (if desired)
-            s3_client.delete_object(Bucket=bucket_name, Key=key)            
+            s3_client.delete_object(Bucket=bucket_name, Key=key)
+            redis_client.delete('attempts:' + key)
+            redis_client.delete('lock:' + key)
             logger.info(f"{key} processed successfully, deleting from S3 bucket.")
         except json.JSONDecodeError as e:
             logger.error("Failed to parse JSON from AI response")
             logger.error(e)
-            # Handle the error accordingly
-
     except Exception as e:
-        logger.exception(f"Error processing image {key} from folder '{folder}':")
+        # Increment the attempt count
+        attempt_count = redis_client.incr('attempts:' + key)
+        if attempt_count >= 3:
+            logger.exception(f"Error processing image {key}. Max attempts reached. Deleting image.")
+            s3_client.delete_object(Bucket=bucket_name, Key=key)
+            redis_client.delete('attempts:' + key)
+            redis_client.delete('lock:' + key)
+        else:
+            logger.exception(f"Error processing image {key}. Retrying after 180 seconds.")
+            redis_client.delete('lock:' + key)
+            raise self.retry(exc=e, countdown=180)
 
-@celery.task
-def process_hero_portrait_task(key, folder, hero_name, region):
+@celery.task(bind=True)
+def process_hero_portrait_task(self, key, folder, hero_name, region):
     if key == "hero-portraits/": return
-    logger.info(f"Processing image: {key} from folder '{folder}' as a hero portrait")
-
+    global redis_client, bucket_name, boto3_config, api_key
+    attempt_count = int(redis_client.get('attempts:' + key) or 0)
+    # Check the attempt count    
+    if attempt_count >= 3:
+        logger.info(f"Image {key} has reached maximum attempts. Deleting image.")
+        s3_client.delete_object(Bucket=bucket_name, Key=key)
+        redis_client.delete('attempts:' + key)
+        redis_client.delete('lock:' + key)
+        return
+    logger.info(f"Processing image: {key} from folder '{folder}' as a hero portrait (attempt {attempt_count + 1})")    
     try:
-        # Initialize Redis client
-        global redis_client
-        api_key = current_app.config['OPENAI_API_KEY']
-
         # Retrieve cached data
         cached_data = redis_client.get('hero_data')
         if cached_data is None:
@@ -306,16 +353,11 @@ def process_hero_portrait_task(key, folder, hero_name, region):
             return
 
         # Initialize S3 client using app.config variables
-        s3_client = boto3.client(
-            's3',
-            aws_access_key_id=current_app.config['AWS_ACCESS_KEY_ID'],
-            aws_secret_access_key=current_app.config['AWS_SECRET_ACCESS_KEY'],
-            region_name=current_app.config['AWS_REGION'],
-        )
+        s3_client = boto3.client('s3', **boto3_config)
 
         # Retrieve and process the image from S3
         response = s3_client.get_object(
-            Bucket=current_app.config['AWS_S3_BUCKET'],
+            Bucket=bucket_name,
             Key=key
         )
         image_content = response['Body'].read()
@@ -339,113 +381,118 @@ def process_hero_portrait_task(key, folder, hero_name, region):
             if cropped_img.width > cropped_img.height:
                 cropped_img = cropped_img.rotate(-90, expand=True)
 
-            # Convert the cropped image to a byte stream
+            # Save the cropped image to separate BytesIO objects
+            img_byte_arr_base64 = io.BytesIO()
+            cropped_img.save(img_byte_arr_base64, format='JPEG')
+            image_bytes = img_byte_arr_base64.getvalue()
+
             img_byte_arr = io.BytesIO()
             cropped_img.save(img_byte_arr, format='JPEG')
             img_byte_arr.seek(0)
-            image_bytes = img_byte_arr.read()
 
-            # POST the image 
-            try:                
-                logger.info("Successfully cropped portrait image")
-                # POST the hero's story and ID to the specified URL
-                files = {
-                    'image': (hero_name + '.jpg', img_byte_arr, 'image/jpeg') 
-                }
-                payload = {
-                    'hero_id': hero['databaseId'],
-                    'region': region,
-                }
+            # Prepare and send the poll to Discord
+            embed_data = {
+                "title": f"Hero Portrait - {hero['title']}",
+                "description": "I did my best!",
+                "color": 3447003,  # Example blue color
+                "fields": [
+                    {"name": "Region", "value": region, "inline": True} if region else None,                        
+                ],
+                "footer": {"text": "Does this look correct?"}
+            }
 
-                # Prepare and send the poll to Discord
-                embed_data = {
-                    "title": f"Hero Portrait - {hero['title']}",
-                    "description": "I did my best!",
-                    "color": 3447003,  # Example blue color
-                    "fields": [
-                        {"name": "Region", "value": payload["region"], "inline": True} if payload["region"] != 0 else None,                        
-                    ],
-                    "footer": {"text": "Does this look correct?"}
-                }
+            # Remove any None fields (in case some stats are not present)
+            embed_data["fields"] = [field for field in embed_data["fields"] if field]
 
-                # Remove any None fields (in case some stats are not present)
-                embed_data["fields"] = [field for field in embed_data["fields"] if field]
+            # Convert the image to Base64
+            base64_image = encode_image_to_base64(image_bytes)
+            
+            # Send poll request to Discord through Redis
+            poll_data = {
+                'channel_id': current_app.config['DISCORD_CHANNEL_ID'], 
+                'is_embed': True,
+                'embed': embed_data,
+                'image': base64_image,
+                'filename': hero_name + '.jpg',
+                'task_id': process_hero_portrait_task.request.id
+            }
+            redis_client.rpush('discord_message_queue', json.dumps(poll_data))
+            logger.info(f"Sent poll to Discord for hero: {hero['title']}")
+            
+            # Wait for poll result (e.g., 120 seconds)
+            result_key = f"discord_poll_result:{process_hero_portrait_task.request.id}"
+            upvotes, downvotes = 0, 0
 
-                # Convert the image to Base64
-                base64_image = encode_image_to_base64(image_bytes)
-                
-                # Send poll request to Discord through Redis
-                poll_data = {
-                    'channel_id': current_app.config['DISCORD_CHANNEL_ID'], 
-                    'is_embed': True,
-                    'embed': embed_data,
-                    'image': base64_image,
-                    'filename': hero_name + '.png',
-                    'task_id': process_hero_portrait_task.request.id
-                }
-                redis_client.rpush('discord_message_queue', json.dumps(poll_data))
-                logger.info(f"Sent poll to Discord for hero: {hero['title']}")
-                
-                # Wait for poll result (e.g., 60 seconds)
-                result_key = f"discord_poll_result:{process_hero_portrait_task.request.id}"
-                upvotes, downvotes = 0, 0
+            for _ in range(120):
+                poll_result = redis_client.get(result_key)
+                if poll_result:
+                    poll_result_data = json.loads(poll_result)
+                    upvotes = poll_result_data.get('upvotes', 0)
+                    downvotes = poll_result_data.get('downvotes', 0)
+                    redis_client.delete(result_key)
+                    break
+                time.sleep(1)
 
-                for _ in range(120):  # Check every second, up to 120 seconds
-                    poll_result = redis_client.get(result_key)
-                    if poll_result:
-                        poll_result_data = json.loads(poll_result)
-                        upvotes = poll_result_data.get('upvotes', 0)
-                        downvotes = poll_result_data.get('downvotes', 0)
-                        redis_client.delete(result_key)
-                        break
-                    time.sleep(1)
+            logger.info("Checking poll results: Upvotes - %d, Downvotes - %d", upvotes, downvotes)
 
-                logger.info("Checking poll results: Upvotes - %d, Downvotes - %d", upvotes, downvotes)
+            # Prepare the files and payload
+            img_byte_arr.seek(0)
+            files = {
+                'image': (hero_name + '.jpg', img_byte_arr, 'image/jpeg')
+            }
+            payload = {
+                'hero_id': str(hero['databaseId']),
+                'region': str(region),
+                'confirmed': '1' if upvotes > downvotes else '0'
+            }
 
+            # Log the data being sent
+            logger.info(f"Sending data: {payload}")
+            logger.info(f"Sending files: {files}")
+
+            # Send the POST request
+            try:
                 update_url = current_app.config['WORDPRESS_SITE'] + '/wp-json/heavenhold/v1/update-portrait'
+                response = requests.post(update_url, files=files, data=payload)
+                response.raise_for_status()
+                logger.info("Hero portrait updated successfully")
+            except requests.exceptions.HTTPError as e:
+                logger.error(f"HTTP error occurred: {e}")
+                logger.error(f"Response content: {response.text}")
+                raise
 
-                # If upvotes are higher than downvotes, post the data to WordPress
-                if upvotes > downvotes:
-                    response = requests.post(update_url, files=files, data={
-                        'hero_id': hero['databaseId'],
-                        'region': region,
-                        'confirmed': True
-                    })
-                    response.raise_for_status()
-                    logger.info("Hero portrait updated successfully")
-                elif upvotes == 0 and downvotes == 0:
-                    response = requests.post(update_url, files=files, data={
-                        'hero_id': hero['databaseId'],
-                        'region': region,
-                        'confirmed': False
-                    })
-                    response.raise_for_status()
-                    logger.info("Hero portrait updated successfully")
-                else:
-                    logger.info(f"Aborting portrait update for {hero['title']}")
-
-                # Delete the image after processing (if desired)
-                s3_client.delete_object(Bucket=current_app.config['AWS_S3_BUCKET'], Key=key)                    
-                fetch_hero_data.delay()
-                logger.info(f"{key} processed successfully, deleting from S3 bucket.")
-            except json.JSONDecodeError as e:
-                logger.error("Failed to parse JSON from AI response")
-                logger.error(e)
-                # Handle the error accordingly
-
+            # Delete the image after processing
+            s3_client.delete_object(Bucket=bucket_name, Key=key)
+            redis_client.delete('attempts:' + key)
+            redis_client.delete('lock:' + key)
+            logger.info(f"{key} processed successfully, deleting from S3 bucket.")
     except Exception as e:
-        logger.exception(f"Error processing image {key} from folder '{folder}':")
+        # Increment the attempt count
+        attempt_count = redis_client.incr('attempts:' + key)
+        if attempt_count >= 3:
+            logger.exception(f"Error processing image {key}. Max attempts reached. Deleting image.")
+            s3_client.delete_object(Bucket=bucket_name, Key=key)
+            redis_client.delete('attempts:' + key)
+            redis_client.delete('lock:' + key)
+        else:
+            logger.exception(f"Error processing image {key}. Retrying after 180 seconds.")
+            redis_client.delete('lock:' + key)
+            raise self.retry(exc=e, countdown=180)
 
-@celery.task
-def process_hero_illustration_task(key, folder, hero_name, region):
+@celery.task(bind=True)
+def process_hero_illustration_task(self, key, folder, hero_name, region):
     if key == "hero-illustrations/": return
-    logger.info(f"Processing image: {key} from folder '{folder}' as a hero illustration and thumbnail")
-
+    global redis_client, bucket_name, boto3_config, api_key
+    attempt_count = int(redis_client.get('attempts:' + key) or 0)
+    # Check the attempt count    
+    if attempt_count >= 3:
+        logger.info(f"Image {key} has reached maximum attempts. Deleting image.")
+        s3_client.delete_object(Bucket=bucket_name, Key=key)
+        redis_client.delete('attempts:' + key)
+        redis_client.delete('lock:' + key)
+        return
+    logger.info(f"Processing image: {key} from folder '{folder}' as a hero illustration and thumbnail (attempt {attempt_count + 1})")   
     try:
-        # Initialize Redis client
-        global redis_client
-        api_key = current_app.config['OPENAI_API_KEY']
-
         # Retrieve cached data
         cached_data = redis_client.get('hero_data')
         if cached_data is None:
@@ -460,15 +507,10 @@ def process_hero_illustration_task(key, folder, hero_name, region):
             return
 
         # Initialize S3 client using app.config variables
-        s3_client = boto3.client(
-            's3',
-            aws_access_key_id=current_app.config['AWS_ACCESS_KEY_ID'],
-            aws_secret_access_key=current_app.config['AWS_SECRET_ACCESS_KEY'],
-            region_name=current_app.config['AWS_REGION'],
-        )
+        s3_client = boto3.client('s3', **boto3_config)
 
         # Generate a pre-signed URL for the image
-        bucket_name = current_app.config['AWS_S3_BUCKET']
+        
         pre_signed_url = s3_client.generate_presigned_url(
             'get_object',
             Params={'Bucket': bucket_name, 'Key': key},
@@ -477,7 +519,7 @@ def process_hero_illustration_task(key, folder, hero_name, region):
 
         # Retrieve and process the image from S3
         s3_response = s3_client.get_object(
-            Bucket=current_app.config['AWS_S3_BUCKET'],
+            Bucket=bucket_name,
             Key=key
         )
         image_content = s3_response['Body'].read()
@@ -526,10 +568,10 @@ def process_hero_illustration_task(key, folder, hero_name, region):
             }
 
             # Make the API call
-            response = requests.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers=headers,
-            json=payload,
+            response = make_api_call_with_backoff(
+                "https://api.openai.com/v1/chat/completions",
+                headers,
+                payload
             )
 
             # Parse the JSON content
@@ -543,29 +585,18 @@ def process_hero_illustration_task(key, folder, hero_name, region):
             # Log the response JSON
             logger.info(cleaned_data)
             
-            # Convert image to a byte stream
+            # Save the image to separate BytesIO objects
+            img_byte_arr_base64 = io.BytesIO()
+            original_img.save(img_byte_arr_base64, format='PNG')
+            image_bytes = img_byte_arr_base64.getvalue()
+
             img_byte_arr = io.BytesIO()
             original_img.save(img_byte_arr, format='PNG')
             img_byte_arr.seek(0)
-            image_bytes = img_byte_arr.read()
             
             # Attempt to parse the extracted data as JSON
             try:  
                 crop_data = json.loads(cleaned_data)
-                
-                # Prepare the form-data payload (all data must be form fields)
-                files = {
-                    'image': (hero_name + '.png', img_byte_arr, 'image/png')
-                }
-                # Sending the rest of the form data as part of `data`
-                payload = {
-                    'hero_id': hero.get('databaseId', 0),
-                    'region': region,
-                    'x': crop_data.get('x', 0),
-                    'y': crop_data.get('y', 0),
-                    'width': crop_data.get('width', 0),
-                    'height': crop_data.get('height', 0),
-                }
 
                 # Prepare and send the poll to Discord
                 embed_data = {
@@ -573,12 +604,13 @@ def process_hero_illustration_task(key, folder, hero_name, region):
                     "description": "Here's what you gave me:",
                     "color": 3447003,  # Example blue color
                     "fields": [
-                        {"name": "Region", "value": payload["region"], "inline": True} if payload["region"] != 0 else None,                        
+                        {"name": "Region", "value": region, "inline": True} if region else None,
+                        {"name": "Crop Data", "value": f"x: {crop_data['x']}, y: {crop_data['y']}, width: {crop_data['width']}, height: {crop_data['height']}", "inline": False},
                     ],
                     "footer": {"text": "Does this look correct?"}
                 }
 
-                # Remove any None fields (in case some stats are not present)
+                # Remove any None fields
                 embed_data["fields"] = [field for field in embed_data["fields"] if field]
 
                 # Convert the image to Base64
@@ -596,11 +628,11 @@ def process_hero_illustration_task(key, folder, hero_name, region):
                 redis_client.rpush('discord_message_queue', json.dumps(poll_data))
                 logger.info(f"Sent poll to Discord for hero: {hero['title']}")
                 
-                # Wait for poll result (e.g., 60 seconds)
+                # Wait for poll result
                 result_key = f"discord_poll_result:{process_hero_illustration_task.request.id}"
                 upvotes, downvotes = 0, 0
 
-                for _ in range(120):  # Check every second, up to 120 seconds
+                for _ in range(120):
                     poll_result = redis_client.get(result_key)
                     if poll_result:
                         poll_result_data = json.loads(poll_result)
@@ -612,60 +644,72 @@ def process_hero_illustration_task(key, folder, hero_name, region):
 
                 logger.info("Checking poll results: Upvotes - %d, Downvotes - %d", upvotes, downvotes)
                 
-                # Send the POST request with form-data
-                update_url = current_app.config['WORDPRESS_SITE'] + '/wp-json/heavenhold/v1/update-illustration'
+                # Prepare the files and payload
+                img_byte_arr.seek(0)
+                files = {
+                    'image': (hero_name + '.png', img_byte_arr, 'image/png')
+                }
+                payload = {
+                    'hero_id': str(hero['databaseId']),
+                    'region': str(region),
+                    'x': str(crop_data.get('x', 0)),
+                    'y': str(crop_data.get('y', 0)),
+                    'width': str(crop_data.get('width', 0)),
+                    'height': str(crop_data.get('height', 0)),
+                    'confirmed': '1' if upvotes > downvotes else '0'
+                }
 
-                # If upvotes are higher than downvotes, post the data to WordPress
-                if upvotes > downvotes:
-                    response = requests.post(update_url, files=files, data={
-                        'hero_id': hero['databaseId'],
-                        'region': region,
-                        'x': crop_data['x'],
-                        'y': crop_data['y'],
-                        'width': crop_data['width'],
-                        'height': crop_data['height'],
-                        'confirmed': True
-                    })
-                    # Raise an exception if the response contains an error
+                # Log the data being sent
+                logger.info(f"Sending data: {payload}")
+                logger.info(f"Sending files: {files}")
+
+                # Send the POST request with form-data
+                try:
+                    update_url = current_app.config['WORDPRESS_SITE'] + '/wp-json/heavenhold/v1/update-illustration'
+                    response = requests.post(update_url, files=files, data=payload)
                     response.raise_for_status()
                     logger.info("Hero illustration/thumbnail updated successfully")
-                elif upvotes == 0 and downvotes == 0:
-                    response = requests.post(update_url, files=files, data={
-                        'hero_id': payload['hero_id'],
-                        'region': payload['region'],
-                        'x': payload['x'],
-                        'y': payload['y'],
-                        'width': payload['width'],
-                        'height': payload['height'],
-                        'confirmed': False
-                    })
-                    # Raise an exception if the response contains an error
-                    response.raise_for_status()
-                    logger.info("Hero illustration/thumbnail updated successfully")
-                else:
-                    logger.info(f"Aborting illustration/thumbnail update for {hero['title']}")
+                except requests.exceptions.HTTPError as e:
+                    logger.error(f"HTTP error occurred: {e}")
+                    logger.error(f"Response content: {response.text}")
+                    raise
                 
-                # Optionally delete the image after processing
-                s3_client.delete_object(Bucket=current_app.config['AWS_S3_BUCKET'], Key=key)
+                # Delete the image after processing
+                s3_client.delete_object(Bucket=bucket_name, Key=key)
+                redis_client.delete('attempts:' + key)
+                redis_client.delete('lock:' + key)
                 logger.info(f"{key} processed successfully, deleting from S3 bucket.")
             except json.JSONDecodeError as e:
                 logger.error("Failed to parse JSON from AI response")
                 logger.error(e)
-                # Handle the error accordingly
-
     except Exception as e:
-        logger.exception(f"Error processing image {key} from folder '{folder}':")
+        # Increment the attempt count
+        attempt_count = redis_client.incr('attempts:' + key)
+        if attempt_count >= 3:
+            logger.exception(f"Error processing image {key}. Max attempts reached. Deleting image.")
+            s3_client.delete_object(Bucket=bucket_name, Key=key)
+            redis_client.delete('attempts:' + key)
+            redis_client.delete('lock:' + key)
+        else:
+            logger.exception(f"Error processing image {key}. Retrying after 180 seconds.")
+            redis_client.delete('lock:' + key)
+            raise self.retry(exc=e, countdown=180)
 
-@celery.task
-def process_hero_bio_task(key, folder, hero_name):
+
+@celery.task(bind=True)
+def process_hero_bio_task(self, key, folder, hero_name):
     if key == "hero-bios/": return
-    logger.info(f"Processing image: {key} from folder '{folder}' as hero bio information.")
-
+    global redis_client, bucket_name, boto3_config, api_key
+    attempt_count = int(redis_client.get('attempts:' + key) or 0)
+    # Check the attempt count    
+    if attempt_count >= 3:
+        logger.info(f"Image {key} has reached maximum attempts. Deleting image.")
+        s3_client.delete_object(Bucket=bucket_name, Key=key)
+        redis_client.delete('attempts:' + key)
+        redis_client.delete('lock:' + key)
+        return
+    logger.info(f"Processing image: {key} from folder '{folder}' as hero bio information (attempt {attempt_count + 1})")
     try:
-        # Initialize Redis client
-        global redis_client
-        api_key = current_app.config['OPENAI_API_KEY']
-
         # Retrieve cached data
         cached_data = redis_client.get('hero_data')
         if cached_data is None:
@@ -680,15 +724,9 @@ def process_hero_bio_task(key, folder, hero_name):
             return
 
         # Initialize S3 client using app.config variables
-        s3_client = boto3.client(
-            's3',
-            aws_access_key_id=current_app.config['AWS_ACCESS_KEY_ID'],
-            aws_secret_access_key=current_app.config['AWS_SECRET_ACCESS_KEY'],
-            region_name=current_app.config['AWS_REGION'],
-        )
+        s3_client = boto3.client('s3', **boto3_config)
 
         # Generate a pre-signed URL for the image
-        bucket_name = current_app.config['AWS_S3_BUCKET']
         pre_signed_url = s3_client.generate_presigned_url(
             'get_object',
             Params={'Bucket': bucket_name, 'Key': key},
@@ -732,10 +770,10 @@ def process_hero_bio_task(key, folder, hero_name):
         }
 
         # Make the API call
-        response = requests.post(
+        response = make_api_call_with_backoff(
             "https://api.openai.com/v1/chat/completions",
-            headers=headers,
-            json=payload,
+            headers,
+            payload
         )
 
         # Parse the JSON content
@@ -838,25 +876,40 @@ def process_hero_bio_task(key, folder, hero_name):
             else:
                 logger.info(f"Aborting bio update for {hero['title']}")
             # Delete the image after processing (if desired)
-            s3_client.delete_object(Bucket=bucket_name, Key=key)
+            s3_client.delete_object(Bucket=bucket_name, Key=key)     
+            redis_client.delete('attempts:' + key)          
+            redis_client.delete('lock:' + key)
             logger.info(f"{key} processed successfully, deleting from S3 bucket.")
         except json.JSONDecodeError as e:
             logger.error("Failed to parse JSON from AI response")
             logger.error(e)
-            # Handle the error accordingly
-
     except Exception as e:
-        logger.exception(f"Error processing image {key} from folder '{folder}':")
+        # Increment the attempt count
+        attempt_count = redis_client.incr('attempts:' + key)
+        if attempt_count >= 3:
+            logger.exception(f"Error processing image {key}. Max attempts reached. Deleting image.")
+            s3_client.delete_object(Bucket=bucket_name, Key=key)
+            redis_client.delete('attempts:' + key)
+            redis_client.delete('lock:' + key)
+        else:
+            logger.exception(f"Error processing image {key}. Retrying after 180 seconds.")
+            redis_client.delete('lock:' + key)
+            raise self.retry(exc=e, countdown=180)
 
-@celery.task
-def process_hero_stats_task(key, folder, hero_name):
-    if key == "hero-stats/": return
-    logger.info(f"Processing image: {key} from folder '{folder}' as hero stat information.")
-    
-    try:
-        global redis_client
-        api_key = current_app.config['OPENAI_API_KEY']
-        
+@celery.task(bind=True)
+def process_hero_stats_task(self, key, folder, hero_name):
+    if key == "hero-stats/": return    
+    global redis_client, bucket_name, boto3_config, api_key
+    attempt_count = int(redis_client.get('attempts:' + key) or 0)
+    # Check the attempt count    
+    if attempt_count >= 3:
+        logger.info(f"Image {key} has reached maximum attempts. Deleting image.")
+        s3_client.delete_object(Bucket=bucket_name, Key=key)
+        redis_client.delete('attempts:' + key)
+        redis_client.delete('lock:' + key)
+        return
+    logger.info(f"Processing image: {key} from folder '{folder}' as hero stat information (attempt {attempt_count + 1})")
+    try:        
         # Retrieve cached data
         cached_data = redis_client.get('hero_data')
         if cached_data is None:
@@ -870,14 +923,9 @@ def process_hero_stats_task(key, folder, hero_name):
             logger.warning(f"Hero '{hero_name}' not found.")
             return
 
-        # Generate a pre-signed URL for the image
-        s3_client = boto3.client(
-            's3',
-            aws_access_key_id=current_app.config['AWS_ACCESS_KEY_ID'],
-            aws_secret_access_key=current_app.config['AWS_SECRET_ACCESS_KEY'],
-            region_name=current_app.config['AWS_REGION'],
-        )
-        bucket_name = current_app.config['AWS_S3_BUCKET']
+        s3_client = boto3.client('s3', **boto3_config)
+
+        # Generate a pre-signed URL for the image    
         pre_signed_url = s3_client.generate_presigned_url(
             'get_object',
             Params={'Bucket': bucket_name, 'Key': key},
@@ -919,10 +967,10 @@ def process_hero_stats_task(key, folder, hero_name):
         }
 
         # Make the API call to OpenAI
-        response = requests.post(
+        response = make_api_call_with_backoff(
             "https://api.openai.com/v1/chat/completions",
-            headers=headers,
-            json=payload,
+            headers,
+            payload
         )
         response.raise_for_status()
         response_json = response.json()
@@ -1067,46 +1115,62 @@ def process_hero_stats_task(key, folder, hero_name):
             logger.info(f"Aborting stat update for {hero['title']}")
         # Delete the image after processing (if desired)
         s3_client.delete_object(Bucket=bucket_name, Key=key)
+        redis_client.delete('attempts:' + key)
+        redis_client.delete('lock:' + key)
         logger.info(f"{key} processed successfully, deleting from S3 bucket.")
     except Exception as e:
-        logger.exception(f"Error processing hero stats: {e}")
+        # Increment the attempt count
+        attempt_count = redis_client.incr('attempts:' + key)
+        if attempt_count >= 3:
+            logger.exception(f"Error processing image {key}. Max attempts reached. Deleting image.")
+            s3_client.delete_object(Bucket=bucket_name, Key=key)
+            redis_client.delete('attempts:' + key)
+            redis_client.delete('lock:' + key)
+        else:
+            logger.exception(f"Error processing image {key}. Retrying after 180 seconds.")
+            redis_client.delete('lock:' + key)
+            raise self.retry(exc=e, countdown=180)
 
 @celery.task
 def check_and_process_s3_images(folder):
-    # logger.info(f"Checking for new images in S3 bucket folder '{folder}'")
+    global redis_client, bucket_name, boto3_config
     try:
         # Initialize S3 client using app.config variables
-        s3_client = boto3.client(
-            's3',
-            aws_access_key_id=current_app.config['AWS_ACCESS_KEY_ID'],
-            aws_secret_access_key=current_app.config['AWS_SECRET_ACCESS_KEY'],
-            region_name=current_app.config['AWS_REGION'],
-        )
+        s3_client = boto3.client('s3', **boto3_config)
 
         # Check for images in the specified S3 bucket folder
         response = s3_client.list_objects_v2(
-            Bucket=current_app.config['AWS_S3_BUCKET'],
+            Bucket=bucket_name,
             Prefix=folder
         )
 
         if 'Contents' in response:
-            # if len(response['Contents']) > 1:  logger.info(f"Found {len(response['Contents'])} items in S3 bucket folder '{folder}'.")
-
             for obj in response['Contents']:
                 key = obj['Key']
                 if key != folder + '/':
-                    # Check if the image has already been processed
-                    if redis_client.sismember('processed_images', key):
-                        logger.info(f"Image {key} has already been processed. Skipping processing.")
-                        continue
+                    # Get the attempt count
+                    attempt_count = int(redis_client.get('attempts:' + key) or 0)
+                    if attempt_count >= 3:
+                        logger.info(f"Image {key} has reached maximum attempts. Deleting image.")
+                        # Delete image from S3
+                        s3_client.delete_object(Bucket=bucket_name, Key=key)
+                        # Delete the attempt counter
+                        redis_client.delete('attempts:' + key)
+                        continue  # Skip to the next image
 
-                    logger.info(f"Found image: {key}, adding to processing queue.")
+                    # Try to acquire the lock
+                    lock_acquired = redis_client.set('lock:' + key, 1, nx=True, ex=600)  # Lock expires in 600 seconds
+                    if not lock_acquired:
+                        logger.info(f"Image {key} is already being processed by another node. Skipping.")
+                        continue  # Skip to the next image
+                    logger.info(f"Found new image: {key}, adding to processing queue.")
                     # Extract hero_name from key
                     filename = key.split('/')[-1]
                     filename_without_extension = filename.split('.')[0]
                     hero_name_parts = filename_without_extension.split('_')
                     if len(hero_name_parts) >= 2:
                         hero_name = hero_name_parts[0]
+                        # Call the appropriate task
                         if folder == "hero-stories":
                             process_hero_story_task.delay(key, folder, hero_name)
                         elif folder == "hero-portraits":
@@ -1119,11 +1183,6 @@ def check_and_process_s3_images(folder):
                             process_hero_bio_task.delay(key, folder, hero_name)
                         elif folder == "hero-stats":                        
                             process_hero_stats_task.delay(key, folder, hero_name)
-                        else:
-                            process_image_task.delay(key, folder)
-                        
-                        # Add the processed image to a set in Redis
-                        redis_client.sadd('processed_images', key)
                     elif filename != '':
                         logger.warning(f"Invalid filename format: {filename}. Skipping processing.")
         else:
@@ -1131,33 +1190,7 @@ def check_and_process_s3_images(folder):
     except Exception as e:
         logger.exception(f"Error checking S3 bucket folder '{folder}': {e}")
 
-@celery.task
-def process_image_task(key, folder):
-    logger.info(f"Processing image: {key} from folder '{folder}'")
-    try:
-        # Initialize S3 client using app.config variables
-        s3_client = boto3.client(
-            's3',
-            aws_access_key_id=current_app.config['AWS_ACCESS_KEY_ID'],
-            aws_secret_access_key=current_app.config['AWS_SECRET_ACCESS_KEY'],
-            region_name=current_app.config['AWS_REGION'],
-        )
-
-        # Retrieve and process the image from S3
-        response = s3_client.get_object(
-            Bucket=current_app.config['AWS_S3_BUCKET'],
-            Key=key
-        )
-        file_content = response['Body'].read()
-
-        # Delete the image after processing (if desired)
-        # s3_client.delete_object(Bucket=current_app.config['AWS_S3_BUCKET'], Key=key)
-        logger.info(f"Image {key} processed successfully.")
-    except Exception as e:
-        logger.exception(f"Error processing image {key} from folder '{folder}':")
-
 def detect_black_bar_width(image_path, threshold=10, black_threshold=50):
-
     # Open image and convert to grayscale
     img = Image.open(image_path).convert('L')  # Convert to grayscale ('L' mode)
     img_array = np.array(img)
@@ -1192,3 +1225,21 @@ def detect_black_bar_width(image_path, threshold=10, black_threshold=50):
 
 def encode_image_to_base64(image_content):
     return base64.b64encode(image_content).decode('utf-8')
+
+def handle_expired_keys():
+    r = redis.Redis(host='redis-service', port=6379, db=0)
+    pubsub = r.pubsub()
+    pubsub.subscribe('__keyevent@0__:expired')
+
+    for message in pubsub.listen():
+        if message['type'] == 'message':
+            expired_key = message['data'].decode('utf-8')
+            if expired_key.startswith('processing:'):
+                key = expired_key[len('processing:'):]
+                # Call the function you want to execute
+                on_key_expired(key)
+
+def on_key_expired(key):
+    logger.info(f"Key {key} has expired after 180 seconds.")
+
+threading.Thread(target=handle_expired_keys, daemon=True).start()

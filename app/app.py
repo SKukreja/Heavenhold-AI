@@ -20,6 +20,16 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 app.config.from_object('config')
 
+bucket_name = app.config['AWS_S3_BUCKET']
+api_key = app.config['OPENAI_API_KEY']
+
+# Store boto3 config as a variable to re-use
+boto3_config = {
+    'aws_access_key_id': app.config['AWS_ACCESS_KEY_ID'],
+    'aws_secret_access_key': app.config['AWS_SECRET_ACCESS_KEY'],
+    'region_name': app.config['AWS_REGION']
+}
+
 # Set up Celery
 def make_celery(app):
     celery = Celery(
@@ -90,6 +100,7 @@ def index():
 
 @app.route('/upload', methods=['POST'])
 def upload_image():
+    global bucket_name
     if 'image' not in request.files:
         return jsonify({'error': 'No image part in the request'}), 400
 
@@ -110,14 +121,9 @@ def upload_image():
         new_filename = f"{hero_name}_{guid}{filename[filename.rfind('.'):]}"
 
         # Upload the image to S3
-        s3_client = boto3.client(
-            's3',
-            aws_access_key_id=app.config['AWS_ACCESS_KEY_ID'],
-            aws_secret_access_key=app.config['AWS_SECRET_ACCESS_KEY'],
-            region_name=app.config['AWS_REGION'],
-        )
+        s3_client = boto3.client('s3', **boto3_config)
         s3_client.put_object(
-            Bucket=app.config['AWS_S3_BUCKET'], 
+            Bucket=bucket_name, 
             Key=f"hero-stories/{new_filename}", 
             Body=file_content
         )
