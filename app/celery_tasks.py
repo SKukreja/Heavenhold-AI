@@ -11,7 +11,9 @@ from flask import current_app
 from .app import celery, bucket_name, boto3_config, api_key
 from .stat_prompt import stat_prompt
 from .assistant_prompt import system_prompt
+from .weapon_prompt import weapon_prompt
 from .hero_query import hero_query
+from .item_query import item_query
 import requests
 import json
 import redis
@@ -106,12 +108,21 @@ def setup_periodic_tasks(sender, **kwargs):
     sender.add_periodic_task(
         180.0,  # Run every 3 minutes
         fetch_hero_data.s(),
-        name="Fetch hero stories data from WordPress",
+        name="Fetch hero data from WordPress",
         countdown=0  # No delay needed
+    )
+
+    # Schedule to fetch hero stories data every 3 minutes
+    sender.add_periodic_task(
+        180.0,  # Run every 3 minutes
+        fetch_item_data.s(),
+        name="Fetch item data from WordPress",
+        countdown=10  # No delay needed
     )
 
     # Trigger tasks immediately on startup
     fetch_hero_data.delay()
+    fetch_item_data.delay()
 
 
 @celery.task
@@ -147,6 +158,40 @@ def fetch_hero_data():
         logger.info(f"Cached data contains {hero_count} heroes.")
     except Exception as e:
         logger.exception("Error fetching hero data:")
+
+@celery.task
+def fetch_item_data():
+    logger.info("Fetching item data from WordPress")
+    try:
+        # Prepare the GraphQL query
+        query = item_query
+
+        # Prepare the request
+        url = current_app.config['WORDPRESS_SITE'] + '/graphql'
+        auth = (
+            current_app.config['WORDPRESS_USERNAME'],
+            current_app.config['WORDPRESS_PASSWORD'],
+        )
+        headers = {'Content-Type': 'application/json'}
+        data = {'query': query}
+
+        # Make the request
+        response = requests.post(url, json=data, headers=headers)
+        response.raise_for_status()
+
+        # Parse the response
+        result = response.json()
+
+        # Store the result in Redis
+        redis_client.set('item_data', json.dumps(result))
+
+        logger.info("Item data cached successfully")
+
+        # Log a summary of the data
+        item_count = len(result['data']['items']['nodes'])
+        logger.info(f"Cached data contains {item_count} items.")
+    except Exception as e:
+        logger.exception("Error fetching item data:")
 
 @celery.task(bind=True)
 def process_hero_story_task(self, key, folder, hero_name):
@@ -1130,6 +1175,250 @@ def process_hero_stats_task(self, key, folder, hero_name):
             logger.exception(f"Error processing image {key}. Retrying after 180 seconds.")
             redis_client.delete('lock:' + key)
             raise self.retry(exc=e, countdown=180)
+        
+@celery.task(bind=True)
+def process_weapon_information_task(self, key, folder, item_name):
+    if key == "weapon-information/": return    
+    global redis_client, bucket_name, boto3_config, api_key
+    attempt_count = int(redis_client.get('attempts:' + key) or 0)
+    # Check the attempt count    
+    if attempt_count >= 3:
+        logger.info(f"Image {key} has reached maximum attempts. Deleting image.")
+        s3_client.delete_object(Bucket=bucket_name, Key=key)
+        redis_client.delete('attempts:' + key)
+        redis_client.delete('lock:' + key)
+        return
+    logger.info(f"Processing image: {key} from folder '{folder}' as weapon information (attempt {attempt_count + 1})")
+    try:        
+        # Retrieve cached data
+        cached_data = redis_client.get('item_data')
+        if cached_data is None:
+            logger.warning("Item data not found in cache.")
+            return
+        
+        item_data = json.loads(cached_data)
+        item = next((i for i in item_data['data']['item']['nodes'] if i['title'] == item_name), None)
+        new_item = False
+        if item is None:
+            logger.warning(f"Item '{item_name}' not found, creating a new item.")
+            new_item = True
+
+
+        s3_client = boto3.client('s3', **boto3_config)
+
+        # Generate a pre-signed URL for the image    
+        pre_signed_url = s3_client.generate_presigned_url(
+            'get_object',
+            Params={'Bucket': bucket_name, 'Key': key},
+            ExpiresIn=3600
+        )
+
+        # AI processing: Preparing the AI payload
+        messages = [
+            {
+                "role": "system",
+                "content": system_prompt,
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                    "text": weapon_prompt + json.dumps(item_data),
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": pre_signed_url
+                        },
+                    }
+                ],
+            },
+        ]
+        
+        payload = {
+            "model": "gpt-4o",
+            "messages": messages,
+            "max_tokens": 1000,
+        }
+
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}"
+        }
+
+        # Make the API call to OpenAI
+        response = make_api_call_with_backoff(
+            "https://api.openai.com/v1/chat/completions",
+            headers,
+            payload
+        )
+        response.raise_for_status()
+        response_json = response.json()
+
+        # Process the AI response
+        extracted_data = response_json['choices'][0]['message']['content']
+        cleaned_data = extracted_data.strip('```json').strip('```')
+
+        # Attempt to parse the extracted data as JSON
+        try:
+            item_info = json.loads(cleaned_data)
+            logger.info("Successfully processed JSON from AI response")
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse JSON: {e}")
+            return
+
+        # Example payload for hero stats from AI response
+        payload = {
+            "name": item_info.get("name", 0),
+            "rarity": item_info.get("rarity", 0),
+            "weapon_type": item_info.get("weapon_type", 0),
+            "exclusive": item_info.get("exclusive", 0),            
+            "hero": item_info.get("hero", 0),
+            "exclusive_effects": item_info.get("exclusive_effects", 0),
+            "min_dps": item_info.get("min_dps", 0),
+            "max_dps": item_info.get("max_dps", 0),
+            "weapon_skill_name": item_info.get("weapon_skill_name", 0),
+            "weapon_skill_atk": item_info.get("weapon_skill_atk", 0),
+            "wepaon_skill_regen_time": item_info.get("weapon_skill_regen_time", 0),
+            "weapon_skill_description": item_info.get("weapon_skill_description", 0),
+            "weapon_skill_chain": item_info.get("weapon_skill_chain", 0),
+            "main_option": item_info.get("main_option", []),
+            "sub_option": item_info.get("sub_option", []),
+            "limit_break_5_option": item_info.get("limit_break_5_option", 0),
+            "limit_break_5_value": item_info.get("limit_break_5_value", 0),
+            "engraving_options": item_info.get("engraving_options", []),
+        }
+
+        # Prepare and send the poll to Discord
+        embed_data = {
+            "title": f"Item Information - {item['title']}",
+            "description": "Here's what I found in your image:",
+            "color": 3447003,  # Example blue color
+            "fields": [
+                {"name": "Name", "value": payload["name"], "inline": True} if payload["name"] != 0 else None,
+                {"name": "Rarity", "value": payload["rarity"], "inline": True} if payload["rarity"] != 0 else None,
+                {"name": "Weapon Type", "value": payload["weapon_type"], "inline": True} if payload["weapon_type"] != 0 else None,
+                {"name": "Exclusive", "value": payload["exclusive"], "inline": True} if payload["exclusive"] != 0 else None,
+                {"name": "Hero", "value": payload["hero"], "inline": True} if payload["hero"] != 0 else None,
+                {"name": "Exclusive Effects", "value": payload["exclusive_effects"], "inline": True} if payload["exclusive_effects"] != 0 else None,
+                {"name": "Min DPS", "value": payload["min_dps"], "inline": True} if payload["min_dps"] != 0 else None,
+                {"name": "Max DPS", "value": payload["max_dps"], "inline": True} if payload["max_dps"] != 0 else None,
+                {"name": "Weapon Skill Name", "value": payload["weapon_skill_name"], "inline": True} if payload["weapon_skill_name"] != 0 else None,
+                {"name": "Weapon Skill Atk", "value": payload["weapon_skill_atk"], "inline": True} if payload["weapon_skill_atk"] != 0 else None,
+                {"name": "Weapon Skill Regen Time", "value": payload["weapon_skill_regen_time"], "inline": True} if payload["weapon_skill_regen_time"] != 0 else None,
+                {"name": "Weapon Skill Description", "value": payload["weapon_skill_description"], "inline": True} if payload["weapon_skill_description"] != 0 else None,
+                {"name": "Weapon Skill Chain", "value": "\n".join(payload["weapon_skill_chain"]), "inline": False} if payload["weapon_skill_chain"] != 0 else None,                
+                {"name": "Main Option", "value": "\n".join(payload["main_option"]), "inline": False},
+                {"name": "Sub Option", "value": "\n".join(payload["sub_option"]), "inline": False},
+                {"name": "Engraving Options", "value": "\n".join(payload["engraving_options"]), "inline": False},
+                {"name": "Limit Break 5 Option", "value": "\n".join(payload["limit_break_5_option"]), "inline": False} if payload["limit_break_5_option"] != 0 else None,
+                {"name": "Limit Break 5 Value", "value": "\n".join(payload["limit_break_5_value"]), "inline": False} if payload["limit_break_5_value"] != 0 else None,
+            ],
+            "footer": {"text": "Does this look correct?"}
+        }
+
+        # Remove any None fields (in case some stats are not present)
+        embed_data["fields"] = [field for field in embed_data["fields"] if field]
+
+        # Send poll request to Discord through Redis
+        poll_data = {
+            'channel_id': current_app.config['DISCORD_CHANNEL_ID'], 
+            'is_embed': True,
+            'embed': embed_data,
+            'task_id': process_weapon_information_task.request.id
+        }
+        redis_client.rpush('discord_message_queue', json.dumps(poll_data))
+        logger.info(f"Sent poll to Discord for hero: {item['title']}")
+
+        # Wait for poll result (e.g., 60 seconds)
+        result_key = f"discord_poll_result:{process_weapon_information_task.request.id}"
+        upvotes, downvotes = 0, 0
+
+        for _ in range(100):  # Check every second, up to 120 seconds
+            poll_result = redis_client.get(result_key)
+            if poll_result:
+                poll_result_data = json.loads(poll_result)
+                upvotes = poll_result_data.get('upvotes', 0)
+                downvotes = poll_result_data.get('downvotes', 0)
+                redis_client.delete(result_key)
+                break
+            time.sleep(1)
+
+        logger.info("Checking poll results: Upvotes - %d, Downvotes - %d", upvotes, downvotes)
+        
+        update_url = f"{current_app.config['WORDPRESS_SITE']}/wp-json/heavenhold/v1/update-weapon"
+        
+        # If upvotes are higher than downvotes, post the data to WordPress
+        if upvotes > downvotes:
+            response = requests.post(update_url, json={
+                "item_id": item['databaseId'] if not new_item else 0,
+                "name": payload.get("name", 0),
+                "rarity": payload.get("rarity", 0),
+                "weapon_type": payload.get("weapon_type", 0),
+                "exclusive": payload.get("exclusive", 0),          
+                "hero": payload.get("hero", 0),
+                "exclusive_effects": payload.get("exclusive_effects", 0),
+                "min_dps": payload.get("min_dps", 0),
+                "max_dps": payload.get("max_dps", 0),
+                "weapon_skill_name": payload.get("weapon_skill_name", 0),
+                "weapon_skill_atk": payload.get("weapon_skill_atk", 0),
+                "wepaon_skill_regen_time": payload.get("weapon_skill_regen_time", 0),
+                "weapon_skill_description": payload.get("weapon_skill_description", 0),
+                "weapon_skill_chain": payload.get("weapon_skill_chain", 0),
+                "main_option": payload.get("main_option", []),
+                "sub_option": payload.get("sub_option", []),
+                "limit_break_5_option": payload.get("limit_break_5_option", 0),
+                "limit_break_5_value": payload.get("limit_break_5_value", 0),
+                "engraving_options": payload.get("engraving_options", []),               
+                'confirmed': True
+            })
+            response.raise_for_status()
+            logger.info(f"Hero stats updated successfully for weapon {item['title']}")
+        elif upvotes == 0 and downvotes == 0:
+            response = requests.post(update_url, json={
+                "item_id": item['databaseId'],
+                "name": payload.get("name", 0),
+                "rarity": payload.get("rarity", 0),
+                "weapon_type": payload.get("weapon_type", 0),
+                "exclusive": payload.get("exclusive", 0),          
+                "hero": payload.get("hero", 0),
+                "exclusive_effects": payload.get("exclusive_effects", 0),
+                "min_dps": payload.get("min_dps", 0),
+                "max_dps": payload.get("max_dps", 0),
+                "weapon_skill_name": payload.get("weapon_skill_name", 0),
+                "weapon_skill_atk": payload.get("weapon_skill_atk", 0),
+                "wepaon_skill_regen_time": payload.get("weapon_skill_regen_time", 0),
+                "weapon_skill_description": payload.get("weapon_skill_description", 0),
+                "weapon_skill_chain": payload.get("weapon_skill_chain", 0),
+                "main_option": payload.get("main_option", []),
+                "sub_option": payload.get("sub_option", []),
+                "limit_break_5_option": payload.get("limit_break_5_option", 0),
+                "limit_break_5_value": payload.get("limit_break_5_value", 0),
+                "engraving_options": payload.get("engraving_options", []),               
+                'confirmed': False
+            })
+            response.raise_for_status()
+            logger.info(f"Hero stats updated successfully for weapon {item['title']}")
+        else:
+            logger.info(f"Aborting stat update for {item['title']}")
+        # Delete the image after processing (if desired)
+        s3_client.delete_object(Bucket=bucket_name, Key=key)
+        redis_client.delete('attempts:' + key)
+        redis_client.delete('lock:' + key)
+        logger.info(f"{key} processed successfully, deleting from S3 bucket.")
+    except Exception as e:
+        # Increment the attempt count
+        attempt_count = redis_client.incr('attempts:' + key)
+        if attempt_count >= 3:
+            logger.exception(f"Error processing image {key}. Max attempts reached. Deleting image.")
+            s3_client.delete_object(Bucket=bucket_name, Key=key)
+            redis_client.delete('attempts:' + key)
+            redis_client.delete('lock:' + key)
+        else:
+            logger.exception(f"Error processing image {key}. Retrying after 180 seconds.")
+            redis_client.delete('lock:' + key)
+            raise self.retry(exc=e, countdown=180)
 
 @celery.task
 def check_and_process_s3_images(folder):
@@ -1183,6 +1472,8 @@ def check_and_process_s3_images(folder):
                             process_hero_bio_task.delay(key, folder, hero_name)
                         elif folder == "hero-stats":                        
                             process_hero_stats_task.delay(key, folder, hero_name)
+                        elif folder == "weapon-information":
+                            process_weapon_information_task.delay(key, folder, hero_name)
                     elif filename != '':
                         logger.warning(f"Invalid filename format: {filename}. Skipping processing.")
         else:

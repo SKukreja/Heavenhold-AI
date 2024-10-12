@@ -41,7 +41,9 @@ intents.message_content = True
 redis_client = redis.Redis(host='redis-service', port=6379, db=0)
 
 dropdown_options = []
+item_options = []
 hero_name_mapping = {}
+item_name_mapping = {}
 waiting_polls = {}
 
 def decode_base64_to_image(base64_string):
@@ -66,6 +68,26 @@ def fetch_hero_data():
     
     return dropdown_options, hero_name_mapping
 
+def fetch_item_data():
+    global item_options, item_name_mapping
+    # Fetch hero data
+    cached_data = redis_client.get('item_data')
+    if cached_data is not None:
+        logger.info("Retrieved item data from cache.")
+        item_data = json.loads(cached_data)
+        item_list = item_data['data']['items']['nodes']
+        # Create a list of (slug, title) tuples
+        item_options = sorted([(item['slug'], item['title']) for item in item_list], key=lambda x: x[1])
+        # Create a mapping for easy lookup
+        item_name_mapping = {item['slug']: item['title'] for item in item_list}
+    else:
+        item_options = []
+        item_name_mapping = {}
+        logger.info("No hero data found in Redis.")
+    
+    return item_options, hero_name_mapping
+
+item_options, item_name_mapping = fetch_item_data()
 dropdown_options, hero_name_mapping = fetch_hero_data()
 
 class Lahn(commands.Bot):
@@ -81,7 +103,8 @@ class Lahn(commands.Bot):
         self.tree.add_command(submit_hero_story)
         self.tree.add_command(submit_hero_stats)
         self.tree.add_command(add_new_hero)
-        await self.tree.sync(guild=guild)
+        self.tree.add_command(submit_weapon_information)
+        await self.tree.sync()
         logger.info("Bot started successfully.")
         
 
@@ -650,6 +673,80 @@ async def illustration_hero_name_autocomplete(interaction: discord.Interaction, 
     # Suggest hero names based on user input
     suggestions = []
     for slug, title in dropdown_options:
+        if current.lower() in title.lower():
+            suggestions.append(app_commands.Choice(name=title, value=slug))
+            if len(suggestions) >= 25:
+                break
+    return suggestions
+
+# Define the slash command
+@app_commands.command(name="submit_weapon_information", description="Upload an image with a weapon's stats or weapon skill to update the site.")
+@app_commands.describe(name="The item name", image="Attach an image")
+async def submit_weapon_information(interaction: discord.Interaction, name: str, image: discord.Attachment):
+    item_options, item_name_mapping = fetch_item_data()
+    if dropdown_options is None:
+        logger.info("No item data found, please try again.")
+        item_options, item_name_mapping = fetch_item_data()
+        await interaction.followup.send("No item data found. Please try again later.")
+        return
+    # Get the hero title from the slug
+    item_title = item_name_mapping.get(name, "Unknown Item")
+    # Acknowledge the interaction
+    await interaction.response.defer(thinking=True)
+    # Process the image and hero name as needed
+    if image is not None:
+        filename = image.filename
+        file_content = await image.read()
+
+        # Generate a GUID
+        guid = str(uuid.uuid4())
+
+        # Construct the new filename
+        file_extension = os.path.splitext(filename)[1]
+        new_filename = f"{name}_{guid}{file_extension}"
+
+        # Upload the image to S3
+        s3_client = boto3.client(
+            's3',
+            aws_access_key_id=AWS_ACCESS_KEY_ID,
+            aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+            region_name=AWS_REGION,
+        )
+        s3_client.put_object(
+            Bucket=AWS_S3_BUCKET, 
+            Key=f"weapon-information/{new_filename}", 
+            Body=file_content
+        )
+        logger.info(f"Uploaded image to S3: {new_filename}")
+
+        # Prepare the embed
+        embed = discord.Embed(
+            title="Weapon Information Uploaded",
+            description=f"**Item:** {item_title}\nWeapon image uploaded successfully!"
+        )
+
+        embed.color = discord.Color.green()
+
+        # Attach the image directly to the Discord message and add it to the embed
+        discord_file = discord.File(io.BytesIO(file_content), filename=filename)
+        embed.set_image(url=f"attachment://{filename}")
+
+        # Send the embed with the attached image
+        await interaction.followup.send(embed=embed, file=discord_file)
+
+# Autocomplete function for hero
+@submit_weapon_information.autocomplete('name')
+async def weapon_information_autocomplete(interaction: discord.Interaction, current: str):
+    global item_options
+    if item_options is None:
+        logger.info("No hero data found, trying to reload...")
+        item_options, item_name_mapping = fetch_item_data()
+        if item_options is None: 
+            await interaction.followup.send("There was a problem getting the list of heroes. Please try again later.")
+            return
+    # Suggest hero names based on user input
+    suggestions = []
+    for slug, title in item_options:
         if current.lower() in title.lower():
             suggestions.append(app_commands.Choice(name=title, value=slug))
             if len(suggestions) >= 25:
