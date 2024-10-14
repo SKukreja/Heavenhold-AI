@@ -362,6 +362,7 @@ def process_hero_story_task(self, key, folder, hero_name):
             redis_client.delete('attempts:' + key)
             redis_client.delete('lock:' + key)
             logger.info(f"{key} processed successfully, deleting from S3 bucket.")
+            fetch_hero_data.delay()    
         except json.JSONDecodeError as e:
             logger.error("Failed to parse JSON from AI response")
             logger.error(e)
@@ -519,6 +520,7 @@ def process_hero_portrait_task(self, key, folder, hero_name, region):
             redis_client.delete('attempts:' + key)
             redis_client.delete('lock:' + key)
             logger.info(f"{key} processed successfully, deleting from S3 bucket.")
+            fetch_hero_data.delay()    
     except Exception as e:
         # Increment the attempt count
         attempt_count = redis_client.incr('attempts:' + key)
@@ -732,6 +734,7 @@ def process_hero_illustration_task(self, key, folder, hero_name, region):
                 redis_client.delete('attempts:' + key)
                 redis_client.delete('lock:' + key)
                 logger.info(f"{key} processed successfully, deleting from S3 bucket.")
+                fetch_hero_data.delay()    
             except json.JSONDecodeError as e:
                 logger.error("Failed to parse JSON from AI response")
                 logger.error(e)
@@ -933,6 +936,7 @@ def process_hero_bio_task(self, key, folder, hero_name):
             redis_client.delete('attempts:' + key)          
             redis_client.delete('lock:' + key)
             logger.info(f"{key} processed successfully, deleting from S3 bucket.")
+            fetch_hero_data.delay()    
         except json.JSONDecodeError as e:
             logger.error("Failed to parse JSON from AI response")
             logger.error(e)
@@ -1171,6 +1175,7 @@ def process_hero_stats_task(self, key, folder, hero_name):
         redis_client.delete('attempts:' + key)
         redis_client.delete('lock:' + key)
         logger.info(f"{key} processed successfully, deleting from S3 bucket.")
+        fetch_hero_data.delay()    
     except Exception as e:
         # Increment the attempt count
         attempt_count = redis_client.incr('attempts:' + key)
@@ -1275,6 +1280,24 @@ def process_weapon_information_task(self, key, folder, item_name):
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse JSON: {e}")
             return
+        
+        # Ensure 'main_option' is always a list
+        main_option = item_info.get("main_option", [])
+        if isinstance(main_option, dict):
+            main_option = [main_option]
+        item_info["main_option"] = main_option
+
+        # Ensure 'sub_option' is always a list
+        sub_option = item_info.get("sub_option", [])
+        if isinstance(sub_option, dict):
+            sub_option = [sub_option]
+        item_info["sub_option"] = sub_option
+
+        # Ensure 'engraving_option' is always a list
+        engraving_options = item_info.get("engraving_options", [])
+        if isinstance(engraving_options, dict):
+            engraving_options = [engraving_options]
+        item_info["engraving_options"] = engraving_options
 
         # Example payload for hero stats from AI response
         payload = {
@@ -1291,11 +1314,12 @@ def process_weapon_information_task(self, key, folder, item_name):
             "weapon_skill_regen_time": item_info.get("weapon_skill_regen_time", 0),
             "weapon_skill_description": item_info.get("weapon_skill_description", 0),
             "weapon_skill_chain": item_info.get("weapon_skill_chain", 0),
-            "main_option": item_info.get("main_option", []),
-            "sub_option": item_info.get("sub_option", []),
+            "main_option": item_info["main_option"],
+            "sub_option": item_info["sub_option"],
             "limit_break_5_option": item_info.get("limit_break_5_option", 0),
             "limit_break_5_value": item_info.get("limit_break_5_value", 0),
-            "engraving_options": item_info.get("engraving_options", []),
+            "engraving_options": item_info["engraving_options"],
+            "max_lines": item_info.get("max_lines", 0),
         }
 
         # Prepare and send the poll to Discord
@@ -1304,24 +1328,25 @@ def process_weapon_information_task(self, key, folder, item_name):
             "description": "Here's what I found in your image:",
             "color": 3447003,  # Example blue color
             "fields": [
-                {"name": "Name", "value": str(payload["name"]), "inline": True} if payload["name"] != 0 else None,
+                {"name": "Name", "value": str(payload["name"]), "inline": False} if payload["name"] != 0 else None,
                 {"name": "Rarity", "value": str(payload["rarity"]), "inline": True} if payload["rarity"] != 0 else None,
                 {"name": "Weapon Type", "value": str(payload["weapon_type"]), "inline": True} if payload["weapon_type"] != 0 else None,
                 {"name": "Exclusive", "value": str(payload["exclusive"]), "inline": True} if payload["exclusive"] != 0 else None,
                 {"name": "Hero", "value": str(payload["hero"]), "inline": True} if payload["hero"] != 0 else None,
-                {"name": "Exclusive Effects", "value": str(payload["exclusive_effects"]), "inline": True} if payload["exclusive_effects"] != 0 else None,
+                {"name": "Exclusive Effects", "value": str(payload["exclusive_effects"]), "inline": False} if payload["exclusive_effects"] != 0 else None,
                 {"name": "Min DPS", "value": str(payload["min_dps"]), "inline": True} if payload["min_dps"] != 0 else None,
                 {"name": "Max DPS", "value": str(payload["max_dps"]), "inline": True} if payload["max_dps"] != 0 else None,
-                {"name": "Weapon Skill Name", "value": str(payload["weapon_skill_name"]), "inline": True} if payload["weapon_skill_name"] != 0 else None,
+                {"name": "Weapon Skill Name", "value": str(payload["weapon_skill_name"]), "inline": False} if payload["weapon_skill_name"] != 0 else None,
                 {"name": "Weapon Skill Atk", "value": str(payload["weapon_skill_atk"]), "inline": True} if payload["weapon_skill_atk"] != 0 else None,
                 {"name": "Weapon Skill Regen Time", "value": str(payload["weapon_skill_regen_time"]), "inline": True} if payload["weapon_skill_regen_time"] != 0 else None,
-                {"name": "Weapon Skill Description", "value": str(payload["weapon_skill_description"]), "inline": True} if payload["weapon_skill_description"] != 0 else None,
-                {"name": "Weapon Skill Chain", "value": str(payload["weapon_skill_chain"]), "inline": False} if payload["weapon_skill_chain"] != 0 else None,                
-                {"name": "Main Option", "value": "\n".join(map(str, payload["main_option"])), "inline": False},
-                {"name": "Sub Option", "value": "\n".join(map(str, payload["sub_option"])), "inline": False},
-                {"name": "Engraving Options", "value": "\n".join(map(str, payload["engraving_options"])), "inline": False},
-                {"name": "Limit Break 5 Option", "value": str(payload["limit_break_5_option"]), "inline": False} if payload["limit_break_5_option"] != 0 else None,
-                {"name": "Limit Break 5 Value", "value": str(payload["limit_break_5_value"]), "inline": False} if payload["limit_break_5_value"] != 0 else None,
+                {"name": "Weapon Skill Chain", "value": str(payload["weapon_skill_chain"]), "inline": True} if payload["weapon_skill_chain"] != 0 else None, 
+                {"name": "Weapon Skill Description", "value": str(payload["weapon_skill_description"]), "inline": False} if payload["weapon_skill_description"] != 0 else None,               
+                {"name": "Main Option", "value": "\n".join(format_option(opt) for opt in payload["main_option"]), "inline": False},
+                {"name": "Sub Option", "value": "\n".join(format_option(opt) for opt in payload["sub_option"]), "inline": False},
+                {"name": "Engraving Options", "value": "\n".join(format_engraving(opt) for opt in payload["engraving_options"]), "inline": False},
+                {"name": "Limit Break 5 Option", "value": str(payload["limit_break_5_option"]), "inline": True} if payload["limit_break_5_option"] != 0 else None,
+                {"name": "Limit Break 5 Value", "value": str(payload["limit_break_5_value"]), "inline": True} if payload["limit_break_5_value"] != 0 else None,
+                {"name": "Max Lines", "value": str(payload["max_lines"]), "inline": True} if payload["max_lines"] != 0 else None,
             ],
             "footer": {"text": "Does this look correct?"}
         }
@@ -1371,14 +1396,15 @@ def process_weapon_information_task(self, key, folder, item_name):
                 "max_dps": payload.get("max_dps", 0),
                 "weapon_skill_name": payload.get("weapon_skill_name", 0),
                 "weapon_skill_atk": payload.get("weapon_skill_atk", 0),
-                "wepaon_skill_regen_time": payload.get("weapon_skill_regen_time", 0),
+                "weapon_skill_regen_time": payload.get("weapon_skill_regen_time", 0),
                 "weapon_skill_description": payload.get("weapon_skill_description", 0),
                 "weapon_skill_chain": payload.get("weapon_skill_chain", 0),
                 "main_option": payload.get("main_option", []),
                 "sub_option": payload.get("sub_option", []),
                 "limit_break_5_option": payload.get("limit_break_5_option", 0),
                 "limit_break_5_value": payload.get("limit_break_5_value", 0),
-                "engraving_options": payload.get("engraving_options", []),               
+                "engraving_options": payload.get("engraving_options", []),
+                "max_lines": payload.get("max_lines", 0),       
                 'confirmed': True
             })
             response.raise_for_status()
@@ -1403,18 +1429,20 @@ def process_weapon_information_task(self, key, folder, item_name):
                 "sub_option": payload.get("sub_option", []),
                 "limit_break_5_option": payload.get("limit_break_5_option", 0),
                 "limit_break_5_value": payload.get("limit_break_5_value", 0),
-                "engraving_options": payload.get("engraving_options", []),               
+                "engraving_options": payload.get("engraving_options", []),
+                "max_lines": payload.get("max_lines", 0),          
                 'confirmed': False
             })
             response.raise_for_status()
             logger.info(f"Item information revision created successfully for weapon {item['title']}")
         else:
-            logger.info(f"Aborting stat update for {item['title']}")
+            logger.info(f"Aborting update for weapon {item['title']}")
         # Delete the image after processing (if desired)
         s3_client.delete_object(Bucket=bucket_name, Key=key)
         redis_client.delete('attempts:' + key)
         redis_client.delete('lock:' + key)
         logger.info(f"{key} processed successfully, deleting from S3 bucket.")
+        fetch_item_data.delay()
     except Exception as e:
         # Increment the attempt count
         attempt_count = redis_client.incr('attempts:' + key)
@@ -1488,6 +1516,17 @@ def check_and_process_s3_images(folder):
             logger.info(f"No images found in the S3 bucket folder '{folder}'.")
     except Exception as e:
         logger.exception(f"Error checking S3 bucket folder '{folder}': {e}")
+
+def format_option(option):
+    """Format each option for display."""
+    if option["is_range"]:
+        return f"{option['stat']} ({option['minimum_value']} - {option['maximum_value']})"
+    else:
+        return f"{option['stat']} ({option['value']})"
+    
+def format_engraving(option):
+    """Format each option for display."""
+    return f"{option['stat']} ({option['value']})"
 
 def detect_black_bar_width(image_path, threshold=10, black_threshold=50):
     # Open image and convert to grayscale

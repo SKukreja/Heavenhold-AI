@@ -11,7 +11,7 @@ Your response should be structured as outlined below:
     "rarity": string, // The rarity of the weapon displayed at the top of the image, under the name either Epic, Legend, Unique, or Rare
     "weapon_type": string, // The weapon type displayed in the image under the title, next to the rarity (Epic, Legend, Unique, Rare)
     "exclusive": bool, // True if the word 'only' is present in the image, False otherwise
-    "hero": string, // The name of the hero this weapon is exclusive to, displayed next to 'only', or an empty string if the weapon is not exclusive
+    "hero": string, // The name of the hero this weapon is exclusive to, displayed next to 'only', or an empty string if the weapon is not exclusive. Always include the full name of the hero, which usually includes a title preceding the first name of the hero.
     "exclusive_effects": string, // Any lines of text displayed under a ('[' + hero + ' only]') headline combined with a line break to separate them, or an empty string if the weapon is not exclusive. Do not include the bracket headlines in the string.
     "min_dps": int, // The first number in the range displayed next to 'DPS'
     "max_dps": int, // The second number in the range displayed next to 'DPS'
@@ -20,7 +20,7 @@ Your response should be structured as outlined below:
     "weapon_skill_regen_time": int, // The number of seconds displayed next to "Regen time:"
     "weapon_skill_description": string, // The description of the weapon skill displayed on the left side of the image under the Regen time
     "weapon_skill_chain": string, // Either "Injured", "Downed", or "Airborne" depending on which one is present in the weapon skill description    
-    "main_option": [ // An array of stats and numbers displayed under the headline "Main Option"
+    "main_option": [ // An array of stats and numbers displayed under the headline "Main Option", or above the Sub Option header if "Main Option" is not present. It's any line below the Lv.1, Lv. 95, Lv. 100 and Engrave tabs that does not have a headline in square brackets above it.
         {                                             
             "stat": string, // (limited to options mentioned below)
             "is_range": bool, // True if the stat is a range, False otherwise
@@ -36,7 +36,8 @@ Your response should be structured as outlined below:
             "maximum_value": int // The second number in the range if 'is_range' is True, or 0 if 'is_range' is False
         },
     ],
-    "sub_option": [ // An array of stats and numbers displayed under the headline "Sub Option" if present, or an empty array if "Sub Option" is not present
+    "max_lines": int, // If the headline "Sub Option" is present, you will see this number in the format "0 to x abilities granted", where x is the number you should put here. If "Sub Option" is not present, use the pre-existing value or 0 if there isn't one.
+    "sub_option": [ // An array of stats and numbers displayed under the headline "Sub Option" if present
         {                                             
             "stat": string, // (limited to options mentioned below)
             "is_range": bool, // True if the stat is a range, False otherwise
@@ -52,7 +53,7 @@ Your response should be structured as outlined below:
             "maximum_value": int // The second number in the range if 'is_range' is True, or 0 if 'is_range' is False
         },
     ],
-    "limit_break_5_option": string, // (limited to 'stat' options below)
+    "limit_break_5_option": string, // (limited to 'stat' options below, do not shorten)
     "limit_break_5_value": int, // The number displayed under the headline "[Required Limit Break 5]" if present, or 0 if "Limit Break 5" is not present
     "engraving_options": [ // An array of stats and numbers displayed under the headline "Exclusive Engraving Option", or an empty array if "Exclusive Engraving Option" is not present
         {                                             
@@ -69,7 +70,7 @@ Your response should be structured as outlined below:
 The possible values you will see for 'weapon_type' are:
 'One-Handed Sword', 'Two-Handed Sword', 'Bow', 'Rifle', 'Staff', 'Basket', 'Gauntlet', 'Claw', 'Shield', 'Accessory', 'Merch', 'Relic', and 'Cards'. If any are not present, just put an empty array for that value.
 
-Possible values for 'stat' are below, select the best one based on what you see in the image:
+Possible values for 'stat' are below, select the best one based on what you see in the image and return it exactly as shown below:
 
 Fire Atk
 Earth Atk
@@ -114,6 +115,8 @@ Increase damage to tanker Hero
 Crit Hit Multiplier
 When a shield is present, damage dealt increases by x% while damage taken decreases by x%
 
+Please note that the (Flat) or (%) version of each stat should be chosen accordingly based on whether the number ends with a percentage or is a flat integer/float.
 Respond with only valid JSON using the mentioned structure, and ignore any icons or other irrelevant information. 
+Remember, if you don't see any information in the screenshot for a particular field such as main_option, engraving_options or sub_option, use the existing information under the corresponding field below, or add any new lines if you see the what could be the end or beginning of the pre-recorded field values below where another screenshot may have cut off.
 Here is the current data we have so far for this item:
 '''
