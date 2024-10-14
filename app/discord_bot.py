@@ -85,7 +85,7 @@ def fetch_item_data():
         item_name_mapping = {}
         logger.info("No hero data found in Redis.")
     
-    return item_options, hero_name_mapping
+    return item_options, item_name_mapping
 
 item_options, item_name_mapping = fetch_item_data()
 dropdown_options, hero_name_mapping = fetch_hero_data()
@@ -104,7 +104,7 @@ class Lahn(commands.Bot):
         self.tree.add_command(submit_hero_stats)
         self.tree.add_command(add_new_hero)
         self.tree.add_command(submit_weapon_information)
-        await self.tree.sync()
+        await self.tree.sync(guild=guild)
         logger.info("Bot started successfully.")
         
 
@@ -683,12 +683,6 @@ async def illustration_hero_name_autocomplete(interaction: discord.Interaction, 
 @app_commands.command(name="submit_weapon_information", description="Upload an image with a weapon's stats or weapon skill to update the site.")
 @app_commands.describe(name="The item name", image="Attach an image")
 async def submit_weapon_information(interaction: discord.Interaction, name: str, image: discord.Attachment):
-    item_options, item_name_mapping = fetch_item_data()
-    if dropdown_options is None:
-        logger.info("No item data found, please try again.")
-        item_options, item_name_mapping = fetch_item_data()
-        await interaction.followup.send("No item data found. Please try again later.")
-        return
     # Get the hero title from the slug
     item_title = item_name_mapping.get(name, "Unknown Item")
     # Acknowledge the interaction
@@ -739,10 +733,10 @@ async def submit_weapon_information(interaction: discord.Interaction, name: str,
 async def weapon_information_autocomplete(interaction: discord.Interaction, current: str):
     global item_options
     if item_options is None:
-        logger.info("No hero data found, trying to reload...")
+        logger.info("No item data found, trying to reload...")
         item_options, item_name_mapping = fetch_item_data()
         if item_options is None: 
-            await interaction.followup.send("There was a problem getting the list of heroes. Please try again later.")
+            await interaction.followup.send("There was a problem getting the list of items. Please try again later.")
             return
     # Suggest hero names based on user input
     suggestions = []

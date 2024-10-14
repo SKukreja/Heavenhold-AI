@@ -11,6 +11,7 @@ from flask import current_app
 from .app import celery, bucket_name, boto3_config, api_key
 from .stat_prompt import stat_prompt
 from .assistant_prompt import system_prompt
+from .item_system_prompt import item_system
 from .weapon_prompt import weapon_prompt
 from .hero_query import hero_query
 from .item_query import item_query
@@ -102,6 +103,13 @@ def setup_periodic_tasks(sender, **kwargs):
         check_and_process_s3_images.s('hero-stats'),
         name="Check 'hero-stats' folder in S3 bucket",
         countdown=40,  # Stagger by 40 seconds
+    )
+
+    sender.add_periodic_task(
+        30.0,  # Run every 60 seconds
+        check_and_process_s3_images.s('weapon-information'),
+        name="Check 'weapon-information' folder in S3 bucket",
+        countdown=50,  # Stagger by 40 seconds
     )
 
     # Schedule to fetch hero stories data every 3 minutes
@@ -1197,7 +1205,7 @@ def process_weapon_information_task(self, key, folder, item_name):
             return
         
         item_data = json.loads(cached_data)
-        item = next((i for i in item_data['data']['item']['nodes'] if i['title'] == item_name), None)
+        item = next((i for i in item_data['data']['items']['nodes'] if i['slug'] == item_name), None)
         new_item = False
         if item is None:
             logger.warning(f"Item '{item_name}' not found, creating a new item.")
@@ -1217,14 +1225,14 @@ def process_weapon_information_task(self, key, folder, item_name):
         messages = [
             {
                 "role": "system",
-                "content": system_prompt,
+                "content": item_system,
             },
             {
                 "role": "user",
                 "content": [
                     {
                         "type": "text",
-                    "text": weapon_prompt + json.dumps(item_data),
+                    "text": weapon_prompt + json.dumps(item),
                     },
                     {
                         "type": "image_url",
@@ -1280,7 +1288,7 @@ def process_weapon_information_task(self, key, folder, item_name):
             "max_dps": item_info.get("max_dps", 0),
             "weapon_skill_name": item_info.get("weapon_skill_name", 0),
             "weapon_skill_atk": item_info.get("weapon_skill_atk", 0),
-            "wepaon_skill_regen_time": item_info.get("weapon_skill_regen_time", 0),
+            "weapon_skill_regen_time": item_info.get("weapon_skill_regen_time", 0),
             "weapon_skill_description": item_info.get("weapon_skill_description", 0),
             "weapon_skill_chain": item_info.get("weapon_skill_chain", 0),
             "main_option": item_info.get("main_option", []),
@@ -1296,24 +1304,24 @@ def process_weapon_information_task(self, key, folder, item_name):
             "description": "Here's what I found in your image:",
             "color": 3447003,  # Example blue color
             "fields": [
-                {"name": "Name", "value": payload["name"], "inline": True} if payload["name"] != 0 else None,
-                {"name": "Rarity", "value": payload["rarity"], "inline": True} if payload["rarity"] != 0 else None,
-                {"name": "Weapon Type", "value": payload["weapon_type"], "inline": True} if payload["weapon_type"] != 0 else None,
-                {"name": "Exclusive", "value": payload["exclusive"], "inline": True} if payload["exclusive"] != 0 else None,
-                {"name": "Hero", "value": payload["hero"], "inline": True} if payload["hero"] != 0 else None,
-                {"name": "Exclusive Effects", "value": payload["exclusive_effects"], "inline": True} if payload["exclusive_effects"] != 0 else None,
-                {"name": "Min DPS", "value": payload["min_dps"], "inline": True} if payload["min_dps"] != 0 else None,
-                {"name": "Max DPS", "value": payload["max_dps"], "inline": True} if payload["max_dps"] != 0 else None,
-                {"name": "Weapon Skill Name", "value": payload["weapon_skill_name"], "inline": True} if payload["weapon_skill_name"] != 0 else None,
-                {"name": "Weapon Skill Atk", "value": payload["weapon_skill_atk"], "inline": True} if payload["weapon_skill_atk"] != 0 else None,
-                {"name": "Weapon Skill Regen Time", "value": payload["weapon_skill_regen_time"], "inline": True} if payload["weapon_skill_regen_time"] != 0 else None,
-                {"name": "Weapon Skill Description", "value": payload["weapon_skill_description"], "inline": True} if payload["weapon_skill_description"] != 0 else None,
-                {"name": "Weapon Skill Chain", "value": "\n".join(payload["weapon_skill_chain"]), "inline": False} if payload["weapon_skill_chain"] != 0 else None,                
-                {"name": "Main Option", "value": "\n".join(payload["main_option"]), "inline": False},
-                {"name": "Sub Option", "value": "\n".join(payload["sub_option"]), "inline": False},
-                {"name": "Engraving Options", "value": "\n".join(payload["engraving_options"]), "inline": False},
-                {"name": "Limit Break 5 Option", "value": "\n".join(payload["limit_break_5_option"]), "inline": False} if payload["limit_break_5_option"] != 0 else None,
-                {"name": "Limit Break 5 Value", "value": "\n".join(payload["limit_break_5_value"]), "inline": False} if payload["limit_break_5_value"] != 0 else None,
+                {"name": "Name", "value": str(payload["name"]), "inline": True} if payload["name"] != 0 else None,
+                {"name": "Rarity", "value": str(payload["rarity"]), "inline": True} if payload["rarity"] != 0 else None,
+                {"name": "Weapon Type", "value": str(payload["weapon_type"]), "inline": True} if payload["weapon_type"] != 0 else None,
+                {"name": "Exclusive", "value": str(payload["exclusive"]), "inline": True} if payload["exclusive"] != 0 else None,
+                {"name": "Hero", "value": str(payload["hero"]), "inline": True} if payload["hero"] != 0 else None,
+                {"name": "Exclusive Effects", "value": str(payload["exclusive_effects"]), "inline": True} if payload["exclusive_effects"] != 0 else None,
+                {"name": "Min DPS", "value": str(payload["min_dps"]), "inline": True} if payload["min_dps"] != 0 else None,
+                {"name": "Max DPS", "value": str(payload["max_dps"]), "inline": True} if payload["max_dps"] != 0 else None,
+                {"name": "Weapon Skill Name", "value": str(payload["weapon_skill_name"]), "inline": True} if payload["weapon_skill_name"] != 0 else None,
+                {"name": "Weapon Skill Atk", "value": str(payload["weapon_skill_atk"]), "inline": True} if payload["weapon_skill_atk"] != 0 else None,
+                {"name": "Weapon Skill Regen Time", "value": str(payload["weapon_skill_regen_time"]), "inline": True} if payload["weapon_skill_regen_time"] != 0 else None,
+                {"name": "Weapon Skill Description", "value": str(payload["weapon_skill_description"]), "inline": True} if payload["weapon_skill_description"] != 0 else None,
+                {"name": "Weapon Skill Chain", "value": str(payload["weapon_skill_chain"]), "inline": False} if payload["weapon_skill_chain"] != 0 else None,                
+                {"name": "Main Option", "value": "\n".join(map(str, payload["main_option"])), "inline": False},
+                {"name": "Sub Option", "value": "\n".join(map(str, payload["sub_option"])), "inline": False},
+                {"name": "Engraving Options", "value": "\n".join(map(str, payload["engraving_options"])), "inline": False},
+                {"name": "Limit Break 5 Option", "value": str(payload["limit_break_5_option"]), "inline": False} if payload["limit_break_5_option"] != 0 else None,
+                {"name": "Limit Break 5 Value", "value": str(payload["limit_break_5_value"]), "inline": False} if payload["limit_break_5_value"] != 0 else None,
             ],
             "footer": {"text": "Does this look correct?"}
         }
@@ -1374,7 +1382,7 @@ def process_weapon_information_task(self, key, folder, item_name):
                 'confirmed': True
             })
             response.raise_for_status()
-            logger.info(f"Hero stats updated successfully for weapon {item['title']}")
+            logger.info(f"Item information updated successfully for weapon {item['title']}")
         elif upvotes == 0 and downvotes == 0:
             response = requests.post(update_url, json={
                 "item_id": item['databaseId'],
@@ -1399,7 +1407,7 @@ def process_weapon_information_task(self, key, folder, item_name):
                 'confirmed': False
             })
             response.raise_for_status()
-            logger.info(f"Hero stats updated successfully for weapon {item['title']}")
+            logger.info(f"Item information revision created successfully for weapon {item['title']}")
         else:
             logger.info(f"Aborting stat update for {item['title']}")
         # Delete the image after processing (if desired)

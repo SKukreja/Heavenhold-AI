@@ -986,4 +986,4 @@ The field structure for the custom post type is below:
         ],
     }
 ]
-                        '''
+'''
