@@ -20,7 +20,7 @@ Your response should be structured as outlined below:
     "weapon_skill_regen_time": int, // The number of seconds displayed next to "Regen time:"
     "weapon_skill_description": string, // The description of the weapon skill displayed on the left side of the image under the Regen time
     "weapon_skill_chain": string, // Either "Injured", "Downed", or "Airborne" depending on which one is present in the weapon skill description    
-    "main_option": [ // An array of stats and numbers displayed under the headline "Main Option", or above the Sub Option header if "Main Option" is not present. It's any line below the Lv.1, Lv. 95, Lv. 100 and Engrave tabs that does not have a headline in square brackets above it.
+    "main_option": [ // An array of stats and numbers displayed under the headline "Main Option", or above the Sub Option header if "Main Option" is not present. It's any line below the Lv.1, Lv. 95, Lv. 100 and Engrave tabs that does not have a headline in square brackets above it. Always be sure to combine with the existing values if there are any, updating values when the chosen 'stat' is already present in the array.
         {                                             
             "stat": string, // (limited to options mentioned below)
             "is_range": bool, // True if the stat is a range, False otherwise
@@ -37,7 +37,7 @@ Your response should be structured as outlined below:
         },
     ],
     "max_lines": int, // If the headline "Sub Option" is present, you will see this number in the format "0 to x abilities granted", where x is the number you should put here. If "Sub Option" is not present, use the pre-existing value or 0 if there isn't one.
-    "sub_option": [ // An array of stats and numbers displayed under the headline "Sub Option" if present
+    "sub_option": [ // An array of stats and numbers displayed under the headline "Sub Option" if present. Always be sure to combine with the existing values if there are any, updating values when the chosen 'stat' is already present in the array.
         {                                             
             "stat": string, // (limited to options mentioned below)
             "is_range": bool, // True if the stat is a range, False otherwise

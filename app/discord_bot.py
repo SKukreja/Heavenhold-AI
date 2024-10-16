@@ -161,8 +161,10 @@ async def on_reaction_add(reaction, user):
             poll_info['upvotes'] += 1
         elif reaction.emoji == '❌':
             poll_info['downvotes'] += 1
+        elif reaction.emoji == '🔄':
+            poll_info['retry'] += 1
 
-        logger.info(f"Reaction added: {reaction.emoji} by {user.name}, updated votes: ✅ {poll_info['upvotes']}, ❌ {poll_info['downvotes']}")
+        logger.info(f"Reaction added: {reaction.emoji} by {user.name}, updated votes: ✅ {poll_info['upvotes']}, ❌ {poll_info['downvotes']}, 🔄 {poll_info.get('retry', 0)}")
 
         # If at least one reaction received, set the future result to proceed
         if not poll_info['future'].done():
@@ -270,11 +272,12 @@ async def send_embed_to_channel(channel_id: int, embed_data: dict, task_id: str,
 
     await poll_message.add_reaction('✅')
     await poll_message.add_reaction('❌')
+    await poll_message.add_reaction('🔄')
 
     # Create a future to wait for reactions
     future = asyncio.Future()
     # Store the future and counts in waiting_polls
-    waiting_polls[poll_message.id] = {'future': future, 'upvotes': 0, 'downvotes': 0, 'task_id': task_id}
+    waiting_polls[poll_message.id] = {'future': future, 'upvotes': 0, 'downvotes': 0, 'retry': 0, 'task_id': task_id}
 
     try:
         # Wait for the future to be set
@@ -287,18 +290,23 @@ async def send_embed_to_channel(channel_id: int, embed_data: dict, task_id: str,
         if poll_info:
             upvotes = poll_info['upvotes']
             downvotes = poll_info['downvotes']
+            retry_count = poll_info.get('retry', 0)
         else:
             upvotes = downvotes = 0
 
         poll_result = {
             'upvotes': upvotes,
-            'downvotes': downvotes
+            'downvotes': downvotes,
+            'retry': retry_count
         }
         redis_client.set(f"discord_poll_result:{task_id}", json.dumps(poll_result))
         redis_client.expire(f"discord_poll_result:{task_id}", 60)
 
         # Update the embed based on poll results
-        if upvotes > downvotes:
+        if retry_count > 0:
+            embed.color = discord.Color.dark_grey()
+            embed.set_footer(text="Okay, I'll try again!")
+        elif upvotes > downvotes:
             embed.color = discord.Color.green()
             embed.set_footer(text="Thanks for confirming! I'll update the site now.")
         elif downvotes > upvotes:
@@ -333,6 +341,20 @@ async def manual_sync_commands(ctx):
     except Exception as e:
         logger.error(f"Error syncing commands: {e}")
         await ctx.send("Error syncing commands.")
+
+@bot.command(name="refresh", hidden=True)
+@commands.is_owner()
+async def refresh(ctx):
+    global dropdown_options, hero_name_mapping, item_options, item_name_mapping
+    try:
+        logger.info("Refreshing data...")         
+        item_options, item_name_mapping = fetch_item_data()
+        dropdown_options, hero_name_mapping = fetch_hero_data()
+        await ctx.send("Data refreshed.")
+        logger.info("Data refreshed.")
+    except Exception as e:
+        logger.error(f"Error refreshing data: {e}")
+        await ctx.send("Error refreshing data.")
 
 # Define the slash command
 @app_commands.command(name="submit_hero_story", description="Upload an image with a hero's story to update the site.")

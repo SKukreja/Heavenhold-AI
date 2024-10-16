@@ -1326,7 +1326,7 @@ def process_weapon_information_task(self, key, folder, item_name):
         embed_data = {
             "title": f"Item Information - {item['title']}",
             "description": "Here's what I found in your image:",
-            "color": 3447003,  # Example blue color
+            "color": 3447003,  # Blue
             "fields": [
                 {"name": "Name", "value": str(payload["name"]), "inline": False} if payload["name"] != 0 else None,
                 {"name": "Rarity", "value": str(payload["rarity"]), "inline": True} if payload["rarity"] != 0 else None,
@@ -1362,11 +1362,11 @@ def process_weapon_information_task(self, key, folder, item_name):
             'task_id': process_weapon_information_task.request.id
         }
         redis_client.rpush('discord_message_queue', json.dumps(poll_data))
-        logger.info(f"Sent poll to Discord for hero: {item['title']}")
+        logger.info(f"Sent poll to Discord for item: {item['title']}")
 
         # Wait for poll result (e.g., 60 seconds)
         result_key = f"discord_poll_result:{process_weapon_information_task.request.id}"
-        upvotes, downvotes = 0, 0
+        upvotes, downvotes, retry_count = 0, 0, 0
 
         for _ in range(100):  # Check every second, up to 120 seconds
             poll_result = redis_client.get(result_key)
@@ -1374,6 +1374,7 @@ def process_weapon_information_task(self, key, folder, item_name):
                 poll_result_data = json.loads(poll_result)
                 upvotes = poll_result_data.get('upvotes', 0)
                 downvotes = poll_result_data.get('downvotes', 0)
+                retry_count = poll_result_data.get('retry', 0)
                 redis_client.delete(result_key)
                 break
             time.sleep(1)
@@ -1383,6 +1384,12 @@ def process_weapon_information_task(self, key, folder, item_name):
         update_url = f"{current_app.config['WORDPRESS_SITE']}/wp-json/heavenhold/v1/update-weapon"
         
         # If upvotes are higher than downvotes, post the data to WordPress
+        if retry_count > 0:
+            logger.info(f"Retrying processing for weapon {item['title']}")
+            # Reset attempt count
+            redis_client.set('attempts:' + key, 0)
+            redis_client.delete('lock:' + key)
+            return
         if upvotes > downvotes:
             response = requests.post(update_url, json={
                 "item_id": item['databaseId'] if not new_item else 0,
@@ -1422,7 +1429,7 @@ def process_weapon_information_task(self, key, folder, item_name):
                 "max_dps": payload.get("max_dps", 0),
                 "weapon_skill_name": payload.get("weapon_skill_name", 0),
                 "weapon_skill_atk": payload.get("weapon_skill_atk", 0),
-                "wepaon_skill_regen_time": payload.get("weapon_skill_regen_time", 0),
+                "weapon_skill_regen_time": payload.get("weapon_skill_regen_time", 0),
                 "weapon_skill_description": payload.get("weapon_skill_description", 0),
                 "weapon_skill_chain": payload.get("weapon_skill_chain", 0),
                 "main_option": payload.get("main_option", []),
@@ -1492,24 +1499,24 @@ def check_and_process_s3_images(folder):
                     # Extract hero_name from key
                     filename = key.split('/')[-1]
                     filename_without_extension = filename.split('.')[0]
-                    hero_name_parts = filename_without_extension.split('_')
-                    if len(hero_name_parts) >= 2:
-                        hero_name = hero_name_parts[0]
+                    file_name_parts = filename_without_extension.split('_')
+                    if len(file_name_parts) >= 2:
+                        slug_name = file_name_parts[0]
                         # Call the appropriate task
                         if folder == "hero-stories":
-                            process_hero_story_task.delay(key, folder, hero_name)
+                            process_hero_story_task.delay(key, folder, slug_name)
                         elif folder == "hero-portraits":
-                            region = hero_name_parts[1]
-                            process_hero_portrait_task.delay(key, folder, hero_name, region)
+                            region = file_name_parts[1]
+                            process_hero_portrait_task.delay(key, folder, slug_name, region)
                         elif folder == "hero-illustrations":
-                            region = hero_name_parts[1]
-                            process_hero_illustration_task.delay(key, folder, hero_name, region)
+                            region = file_name_parts[1]
+                            process_hero_illustration_task.delay(key, folder, slug_name, region)
                         elif folder == "hero-bios":                        
-                            process_hero_bio_task.delay(key, folder, hero_name)
+                            process_hero_bio_task.delay(key, folder, slug_name)
                         elif folder == "hero-stats":                        
-                            process_hero_stats_task.delay(key, folder, hero_name)
+                            process_hero_stats_task.delay(key, folder, slug_name)
                         elif folder == "weapon-information":
-                            process_weapon_information_task.delay(key, folder, hero_name)
+                            process_weapon_information_task.delay(key, folder, slug_name)
                     elif filename != '':
                         logger.warning(f"Invalid filename format: {filename}. Skipping processing.")
         else:
@@ -1520,13 +1527,13 @@ def check_and_process_s3_images(folder):
 def format_option(option):
     """Format each option for display."""
     if option["is_range"]:
-        return f"{option['stat']} ({option['minimum_value']} - {option['maximum_value']})"
+        return f"{option['stat']} {option['minimum_value']} - {option['maximum_value']}"
     else:
-        return f"{option['stat']} ({option['value']})"
+        return f"{option['stat']} {option['value']}"
     
 def format_engraving(option):
     """Format each option for display."""
-    return f"{option['stat']} ({option['value']})"
+    return f"{option['stat']} {option['value']}"
 
 def detect_black_bar_width(image_path, threshold=10, black_threshold=50):
     # Open image and convert to grayscale
