@@ -1,3 +1,7 @@
 config.py
 .vscode/
 __pycache__/
+
+# Ignore Kubernetes secret files
+secret.yaml
+*.secret.yaml

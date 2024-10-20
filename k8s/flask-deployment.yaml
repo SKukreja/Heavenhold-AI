@@ -19,9 +19,9 @@ spec:
           ports:
             - containerPort: 5000
           env:
-            - name: DEV_BROKER_URL                     
+            - name: DEV_BROKER_URL
               value: "redis://redis-service:6379/0"
-          command: ["gunicorn", "-b", "0.0.0.0:5000", "app.app:app"]
+          command: ["gunicorn", "-b", "0.0.0.0:5000", "flask_app.app:app"]
 
 ---
 apiVersion: v1

@@ -17,7 +17,7 @@ services:
       - redis
     environment:
       - ENV=DEV
-    command: celery -A app.celery_tasks worker --loglevel=info  # Runs Celery worker
+    command: celery -A celery.app:celery worker --loglevel=info  # Runs Celery worker
 
   # Celery Beat for periodic tasks (like checking S3)
   celery_beat:
@@ -26,7 +26,7 @@ services:
       - redis
     environment:
       - ENV=DEV
-    command: celery -A app.celery_tasks beat --loglevel=info  # Runs Celery Beat scheduler
+    command: celery -A celery.app:celery beat --loglevel=info  # Runs Celery Beat scheduler
 
   # Redis as the message broker for Celery
   redis:

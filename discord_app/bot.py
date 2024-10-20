@@ -102,11 +102,16 @@ class Lahn(commands.Bot):
         self.tree.add_command(submit_hero_portrait)
         self.tree.add_command(submit_hero_story)
         self.tree.add_command(submit_hero_stats)
-        self.tree.add_command(add_new_hero)
         self.tree.add_command(submit_weapon_information)
-        await self.tree.sync(guild=guild)
+        self.tree.add_command(submit_merch_information)
+        self.tree.add_command(submit_card_information)
+        self.tree.add_command(submit_relic_information)
+        self.tree.add_command(submit_accessory_information)        
+        self.tree.add_command(submit_costume)
+        self.tree.add_command(add_new_hero)
+        self.tree.add_command(add_new_item)        
+        await self.tree.sync()
         logger.info("Bot started successfully.")
-        
 
 bot = Lahn()
 
@@ -328,8 +333,20 @@ async def manual_sync_commands(ctx):
         ctx.bot.tree.remove_command(submit_hero_illustration)
         ctx.bot.tree.remove_command(submit_hero_bio)
         ctx.bot.tree.remove_command(submit_hero_stats)
+        ctx.bot.tree.remove_command(submit_merch_information)
+        ctx.bot.tree.remove_command(submit_card_information)
+        ctx.bot.tree.remove_command(submit_relic_information)
+        ctx.bot.tree.remove_command(submit_accessory_information)        
+        ctx.bot.tree.remove_command(submit_costume)
         ctx.bot.tree.remove_command(add_new_hero)
+        ctx.bot.tree.remove_command(add_new_item)
+        ctx.bot.tree.add_command(add_new_item)
         ctx.bot.tree.add_command(add_new_hero)
+        ctx.bot.tree.add_command(submit_costume)
+        ctx.bot.tree.add_command(submit_accessory_information)
+        ctx.bot.tree.add_command(submit_relic_information)        
+        ctx.bot.tree.add_command(submit_card_information)        
+        ctx.bot.tree.add_command(submit_merch_information)        
         ctx.bot.tree.add_command(submit_hero_stats)
         ctx.bot.tree.add_command(submit_hero_illustration)
         ctx.bot.tree.add_command(submit_hero_bio)
@@ -791,5 +808,62 @@ async def add_new_hero(interaction: discord.Interaction, title: str, name: str):
         await interaction.followup.send(f"**Hero:** {name} created! Please allow 2-3 minutes for lists to update.")
     else:
         await interaction.followup.send(f"**Hero:** {name}\nHero already exists.")
+
+# Define the slash command
+@app_commands.command(name="add_new_item", description="Add a new blank item to the site.")
+@app_commands.describe(name="Enter the item's name (Example: 'Master Sword')")
+async def add_new_item(interaction: discord.Interaction, name: str):
+    # Get the hero title from the slug
+    item_title = item_name_mapping.get(name, "Unknown Item")
+    # Acknowledge the interaction
+    await interaction.response.defer(thinking=True)
+    # Process the image and hero name as needed
+    if item_title == "Unknown Item":
+        payload = {            
+            'item_name': name,
+        }
+        update_url = WORDPRESS_SITE + '/wp-json/heavenhold/v1/add-new-item'
+        response = requests.post(update_url, data=payload)
+        # Raise an exception if the response contains an error
+        response.raise_for_status()
+        # Send a confirmation message
+        await interaction.followup.send(f"**Item:** {name} created! Please allow 2-3 minutes for lists to update.")
+    else:
+        await interaction.followup.send(f"**Item:** {name}\nItem already exists.")
+
+# Define the slash command
+@app_commands.command(name="submit_merch_information", description="Update merch equipment on the site.")
+@app_commands.describe(name="Enter the item's name (Example: 'Ocarina')")
+async def submit_merch_information(interaction: discord.Interaction, name: str):
+    # Get the hero title from the slug
+    return 
+
+# Define the slash command
+@app_commands.command(name="submit_card_information", description="Update card equipment on the site.")
+@app_commands.describe(name="Enter the item's name (Example: 'Blue Eyes White Dragon')")
+async def submit_card_information(interaction: discord.Interaction, name: str):
+    # Get the hero title from the slug
+    return 
+
+# Define the slash command
+@app_commands.command(name="submit_relic_information", description="Update relic equipment on the site.")
+@app_commands.describe(name="Enter the item's name (Example: 'Triforce of Courage')")
+async def submit_relic_information(interaction: discord.Interaction, name: str):
+    # Get the hero title from the slug
+    return 
+
+# Define the slash command
+@app_commands.command(name="submit_accessory_information", description="Update accessory equipment on the site.")
+@app_commands.describe(name="Enter the item's name (Example: 'Infinity Gauntlet')")
+async def submit_accessory_information(interaction: discord.Interaction, name: str):
+    # Get the hero title from the slug
+    return 
+
+# Define the slash command
+@app_commands.command(name="submit_costume", description="Update a hero costume on the site.")
+@app_commands.describe(name="Enter the item's name (Example: 'Zora Tunic')")
+async def submit_costume(interaction: discord.Interaction, name: str):
+    # Get the hero title from the slug
+    return 
 
 bot.run(DISCORD_TOKEN)

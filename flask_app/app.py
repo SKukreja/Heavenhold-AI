@@ -6,7 +6,7 @@ from werkzeug.utils import secure_filename
 import boto3
 import redis
 import json
-from celery import Celery
+from config import AWS_S3_BUCKET
 
 # Configure logging
 logging.basicConfig(
@@ -20,9 +20,6 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 app.config.from_object('config')
 
-bucket_name = app.config['AWS_S3_BUCKET']
-api_key = app.config['OPENAI_API_KEY']
-
 # Store boto3 config as a variable to re-use
 boto3_config = {
     'aws_access_key_id': app.config['AWS_ACCESS_KEY_ID'],
@@ -30,27 +27,6 @@ boto3_config = {
     'region_name': app.config['AWS_REGION']
 }
 
-# Set up Celery
-def make_celery(app):
-    celery = Celery(
-        app.import_name,
-        broker=app.config['DEV_BROKER_URL'],
-        backend=app.config['DEV_RESULT_BACKEND'],  # Optional
-    )
-    celery.conf.update(app.config)
-
-    class ContextTask(celery.Task):
-        def __call__(self, *args, **kwargs):
-            with app.app_context():
-                return self.run(*args, **kwargs)
-
-    celery.Task = ContextTask
-    return celery
-
-celery = make_celery(app)
-
-# Import celery tasks to ensure they are registered
-from . import celery_tasks
 import uuid
 
 # Allowed file extensions
@@ -100,7 +76,7 @@ def index():
 
 @app.route('/upload', methods=['POST'])
 def upload_image():
-    global bucket_name
+    global AWS_S3_BUCKET
     if 'image' not in request.files:
         return jsonify({'error': 'No image part in the request'}), 400
 
@@ -123,7 +99,7 @@ def upload_image():
         # Upload the image to S3
         s3_client = boto3.client('s3', **boto3_config)
         s3_client.put_object(
-            Bucket=bucket_name, 
+            Bucket=AWS_S3_BUCKET, 
             Key=f"hero-stories/{new_filename}", 
             Body=file_content
         )
