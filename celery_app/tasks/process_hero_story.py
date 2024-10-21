@@ -114,7 +114,7 @@ def process_hero_story_task(self, key, folder, hero_name):
             # Prepare and send the poll to Discord
             embed_data = {
                 "title": f"Hero Story - {hero['title']}",
-                "description": "Here's what I found in your image:\n\n" + payload['story'].replace("<br />", "\n"),
+                "description": "Here's what I found in your image:\n\n" + (payload['story'] + "").replace("<br />", "\n"),
                 "color": 3447003,                
                 "footer": {"text": "Does this look correct?"}
             }

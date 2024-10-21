@@ -74,14 +74,14 @@ def process_hero_illustration_task(self, key, folder, hero_name, region):
             messages = [
                 {
                     "role": "system",
-                    "content": system_prompt,
+                    "content": "You are responsible for looking at screenshots you will be provided with of the popular mobile game, Guardian Tales. Your goal will be to help document information about the heroes in the game on a WordPress database. The heroes are stored as a custom post type called Heroes, with various custom fields representing details about the hero that may be present in these screenshots.",
                 },
                 {
                     "role": "user",
                     "content": [
                         {
                             "type": "text",
-                            "text": illustration_prompt, 
+                            "text": illustration_prompt +  f"{original_img.size[0]}x{original_img.size[1]} pixels.", 
                         },
                         {
                             "type": "image_url",

@@ -5,6 +5,7 @@ import requests
 import io
 import tempfile
 import boto3
+import os
 from celery import shared_task
 from PIL import Image
 from ..utils import encode_image_to_base64, detect_black_bar_width, redis_client, boto3_config

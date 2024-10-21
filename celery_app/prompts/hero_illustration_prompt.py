@@ -1,3 +1,20 @@
 illustration_prompt = '''
-Please analyze this image and generate a JSON object containing the top left pixel coordinates of a crop box that crops the face of the character you see in the image. Respond with only valid JSON data to import. The JSON keys to include are 'x', 'y', 'width', and 'height'. The thumbnail crop should be a 1:1 square image framing the character's entire face. Ensure the crop coordinates are proportional to the resolution of the image. Calculate x, y, width, and height values such that their resulting crop box would not exceed 500x500px and covers the face of the character in the image's original resolution, which is " + str(original_img.size[0]) + "x" + str(original_img.size[1]) + " pixels. Determine the resolution of the image you're looking at, and multiply the values by how much the resolution has been downscaled in the version of the image you're looking at.
+Find the face of the character in the attached image and provide a JSON object containing the coordinates (x, y) and dimensions (width, height) of a square crop box that frames the face in the image. The crop box should:
+
+1. Be a 1:1 square framing the entire face of the character.
+2. Not exceed 500x500 pixels.
+3. Stay within the bounds of the image.
+
+Respond only with the JSON object in the following format:
+
+{
+    "x": int,
+    "y": int,
+    "width": int,
+    "height": int
+}
+
+Do not include any additional text in your response. If for any reason you cannot do this, simply respond with x=0, y=0, width=500, height=500 as the JSON object.
+
+Determine the resolution of the image you're looking at, and multiply the values by how much the resolution has been downscaled in the version of the image you're looking at, given that the image's original resolution is:
 '''
