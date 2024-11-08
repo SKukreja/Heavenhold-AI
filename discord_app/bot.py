@@ -56,7 +56,13 @@ def fetch_hero_data():
     if cached_data is not None:
         logger.info("Retrieved hero data from cache.")
         hero_data = json.loads(cached_data)
-        heroes_list = hero_data['data']['heroes']['nodes']
+        
+        # Check if the data is a list or has the expected structure
+        if isinstance(hero_data, list):
+            heroes_list = hero_data  # Use directly if it's a list
+        else:
+            heroes_list = hero_data.get('data', {}).get('heroes', {}).get('nodes', [])
+        
         # Create a list of (slug, title) tuples
         dropdown_options = sorted([(hero['slug'], hero['title']) for hero in heroes_list], key=lambda x: x[1])
         # Create a mapping for easy lookup
@@ -70,12 +76,18 @@ def fetch_hero_data():
 
 def fetch_item_data():
     global item_options, item_name_mapping
-    # Fetch hero data
+    # Fetch item data
     cached_data = redis_client.get('item_data')
     if cached_data is not None:
         logger.info("Retrieved item data from cache.")
         item_data = json.loads(cached_data)
-        item_list = item_data['data']['items']['nodes']
+        
+        # Check if the data is a list or has the expected structure
+        if isinstance(item_data, list):
+            item_list = item_data  # Use directly if it's a list
+        else:
+            item_list = item_data.get('data', {}).get('items', {}).get('nodes', [])
+        
         # Create a list of (slug, title) tuples
         item_options = sorted([(item['slug'], item['title']) for item in item_list], key=lambda x: x[1])
         # Create a mapping for easy lookup
@@ -83,12 +95,14 @@ def fetch_item_data():
     else:
         item_options = []
         item_name_mapping = {}
-        logger.info("No hero data found in Redis.")
+        logger.info("No item data found in Redis.")
     
     return item_options, item_name_mapping
 
+# Fetch the data
 item_options, item_name_mapping = fetch_item_data()
 dropdown_options, hero_name_mapping = fetch_hero_data()
+
 
 class Lahn(commands.Bot):
     def __init__(self):

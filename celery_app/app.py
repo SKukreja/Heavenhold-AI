@@ -86,7 +86,7 @@ def setup_periodic_tasks(sender, **kwargs):
 
     # Schedule to fetch hero stories data every 3 minutes
     sender.add_periodic_task(
-        180.0,  # Run every 3 minutes
+        360.0,  # Run every 3 minutes
         fetch_hero_data.s(),
         name="Fetch hero data from WordPress",
         countdown=0  # No delay needed
@@ -94,7 +94,7 @@ def setup_periodic_tasks(sender, **kwargs):
 
     # Schedule to fetch hero stories data every 3 minutes
     sender.add_periodic_task(
-        180.0,  # Run every 3 minutes
+        360.0,  # Run every 3 minutes
         fetch_item_data.s(),
         name="Fetch item data from WordPress",
         countdown=10  # No delay needed

@@ -1,6 +1,10 @@
 item_query = '''
-query GetAllItems {
-  items(first: 2000) {
+query GetAllItems($after: String) {
+  items(first: 100, after: $after) {
+    pageInfo {
+      endCursor
+      hasNextPage
+    }
     nodes {
       id
       databaseId
