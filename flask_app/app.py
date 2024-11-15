@@ -49,7 +49,7 @@ def index():
     dropdown_options = []
     if cached_data is not None:
         hero_data = json.loads(cached_data)
-        heroes_list = hero_data['data']['heroes']['nodes']
+        heroes_list = hero_data
         dropdown_options = sorted([(hero['slug'], hero['title']) for hero in heroes_list])
         logger.info("Retrieved hero data from cache.")
     return render_template_string('''

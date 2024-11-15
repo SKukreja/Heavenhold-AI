@@ -35,7 +35,7 @@ def process_weapon_information_task(self, key, folder, item_name):
             return
         
         item_data = json.loads(cached_data)
-        item = next((i for i in item_data['data']['items']['nodes'] if i['slug'] == item_name), None)
+        item = next((i for i in item_data if i['slug'] == item_name), None)
         new_item = False
         if item is None:
             logger.warning(f"Item '{item_name}' not found, creating a new item.")

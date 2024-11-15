@@ -35,7 +35,7 @@ def process_hero_story_task(self, key, folder, hero_name):
             return
         
         hero_data = json.loads(cached_data)
-        hero = next((h for h in hero_data['data']['heroes']['nodes'] if h['slug'] == hero_name), None)
+        hero = next((h for h in hero_data if h['slug'] == hero_name), None)
 
         if hero is None:
             logger.warning(f"Hero '{hero_name}' not found.")

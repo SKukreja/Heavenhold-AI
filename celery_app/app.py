@@ -15,6 +15,8 @@ from .tasks.process_weapon_information import process_weapon_information_task
 from .utils import handle_expired_keys, redis_client, boto3_config
 from config import DEV_BROKER_URL, DEV_RESULT_BACKEND, AWS_S3_BUCKET
 
+bucket_name = AWS_S3_BUCKET
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
