@@ -12,7 +12,7 @@ Your response should be structured as outlined below:
     "weapon_type": string, // The weapon type displayed in the image under the title, next to the rarity (Epic, Legend, Unique, Rare)
     "exclusive": bool, // True if the word 'only' is present in the image, False otherwise
     "hero": string, // The name of the hero this weapon is exclusive to, displayed next to 'only', or an empty string if the weapon is not exclusive. Always include the full name of the hero, which usually includes a title preceding the first name of the hero.
-    "exclusive_effects": string, // Any lines of text displayed under a ('[' + hero + ' only]') headline combined with a line break to separate them, or an empty string if the weapon is not exclusive. Do not include the bracket headlines in the string.
+    "exclusive_effects": string, // Any lines of text displayed under a ('[' + hero + ' only]') headline combined with a line break to separate them, or an empty string if the weapon is not exclusive. Do not include the bracket headlines in the string. Any lines like "Weapon Skill Lv +x" should be added at the end of this field if not already present, with a line break separating it from the rest of the text.
     "min_dps": int, // The first number in the range displayed next to 'DPS'
     "max_dps": int, // The second number in the range displayed next to 'DPS'
     "weapon_skill_name": string, // The name of the weapon skill displayed on the left side of the image, always ends with Lv.# where # is the level of the skill and should be included in the string

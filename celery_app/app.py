@@ -1,9 +1,13 @@
 # app/celery_tasks.py
 
+import json
 import logging
 import boto3
 import threading
 from celery import Celery
+
+from celery_app.tasks.process_costume import process_costume_task
+from celery_app.tasks.process_illustration_costume import process_costume_illustration_task
 from .tasks.fetch_hero_data import fetch_hero_data
 from .tasks.fetch_item_data import fetch_item_data
 from .tasks.process_hero_story import process_hero_story_task
@@ -12,6 +16,7 @@ from .tasks.process_hero_illustration import process_hero_illustration_task
 from .tasks.process_hero_bio import process_hero_bio_task
 from .tasks.process_hero_stats import process_hero_stats_task
 from .tasks.process_weapon_information import process_weapon_information_task
+from .tasks.process_hero_review import process_hero_review_task
 from .utils import handle_expired_keys, redis_client, boto3_config
 from config import DEV_BROKER_URL, DEV_RESULT_BACKEND, AWS_S3_BUCKET
 
@@ -43,52 +48,72 @@ celery = make_celery()
 # Set up periodic tasks
 @celery.on_after_finalize.connect
 def setup_periodic_tasks(sender, **kwargs):
-    # Schedule to check 'hero-stories' folder every 60 seconds with staggered delays
     sender.add_periodic_task(
-        30.0,  # Run every 60 seconds
+        120.0,
+        check_hero_review_queue_for_messages.s(),
+        name="Check redis for hero reviews",
+        countdown=30,  # No delay
+    )
+
+    sender.add_periodic_task(
+        120.0,  # Run every 60 seconds
         check_and_process_s3_images.s('hero-stories'),
         name="Check 'hero-stories' folder in S3 bucket",
-        countdown=0,  # No delay
+        countdown=40,  # No delay
     )
 
     sender.add_periodic_task(
-        30.0,  # Run every 60 seconds
+        120.0,  # Run every 60 seconds
         check_and_process_s3_images.s('hero-portraits'),
         name="Check 'hero-portraits' folder in S3 bucket",
-        countdown=10,  # Stagger by 10 seconds
+        countdown=50,  # Stagger by 10 seconds
     )
 
     sender.add_periodic_task(
-        30.0,  # Run every 60 seconds
+        120.0,  # Run every 60 seconds
         check_and_process_s3_images.s('hero-illustrations'),
         name="Check 'hero-illustrations' folder in S3 bucket",
-        countdown=20,  # Stagger by 20 seconds
+        countdown=60,  # Stagger by 20 seconds
     )
 
     sender.add_periodic_task(
-        30.0,  # Run every 60 seconds
+        120.0,  # Run every 60 seconds
         check_and_process_s3_images.s('hero-bios'),
         name="Check 'hero-bios' folder in S3 bucket",
-        countdown=30,  # Stagger by 30 seconds
+        countdown=70,  # Stagger by 30 seconds
     )
 
     sender.add_periodic_task(
-        30.0,  # Run every 60 seconds
+        120.0,  # Run every 60 seconds
         check_and_process_s3_images.s('hero-stats'),
         name="Check 'hero-stats' folder in S3 bucket",
-        countdown=40,  # Stagger by 40 seconds
+        countdown=80,  # Stagger by 40 seconds
     )
 
     sender.add_periodic_task(
-        30.0,  # Run every 60 seconds
+        120.0,  # Run every 60 seconds
         check_and_process_s3_images.s('weapon-information'),
         name="Check 'weapon-information' folder in S3 bucket",
-        countdown=50,  # Stagger by 40 seconds
+        countdown=90,  # Stagger by 40 seconds
+    )
+
+    sender.add_periodic_task(
+        120.0,
+        check_and_process_s3_images.s('costumes'),
+        name="Check 'costumes' folder in S3 bucket",
+        countdown=100,
+    )
+
+    sender.add_periodic_task(
+        120.0,
+        check_and_process_s3_images.s('costume-illustrations'),
+        name="Check 'costume-illustrations' folder in S3 bucket",
+        countdown=110,
     )
 
     # Schedule to fetch hero stories data every 3 minutes
     sender.add_periodic_task(
-        360.0,  # Run every 3 minutes
+        600.0,  # Run every 6 minutes
         fetch_hero_data.s(),
         name="Fetch hero data from WordPress",
         countdown=0  # No delay needed
@@ -96,7 +121,7 @@ def setup_periodic_tasks(sender, **kwargs):
 
     # Schedule to fetch hero stories data every 3 minutes
     sender.add_periodic_task(
-        360.0,  # Run every 3 minutes
+        600.0,  # Run every 6 minutes
         fetch_item_data.s(),
         name="Fetch item data from WordPress",
         countdown=10  # No delay needed
@@ -158,13 +183,40 @@ def check_and_process_s3_images(folder):
                             process_hero_bio_task.delay(key, folder, slug_name)
                         elif folder == "hero-stats":                        
                             process_hero_stats_task.delay(key, folder, slug_name)
-                        elif folder == "weapon-information":
-                            process_weapon_information_task.delay(key, folder, slug_name)
+                        elif folder == "costumes":
+                            costume_type = file_name_parts[0]
+                            item_name = file_name_parts[1]
+                            hero_name = None
+                            item_type = None
+                            if(costume_type == "hero"):
+                                hero_name = file_name_parts[2]
+                            if(costume_type == "equipment"):
+                                item_type = file_name_parts[2]
+                            process_costume_task.delay(key, folder, item_name, hero_name, item_type)
+                        elif folder == "costume-illustrations":
+                            item_name = file_name_parts[1]
+                            hero_name = file_name_parts[2]
+                            process_costume_illustration_task.delay(key, folder, item_name, hero_name)
+
                     elif filename != '':
                         logger.warning(f"Invalid filename format: {filename}. Skipping processing.")
         else:
             logger.info(f"No images found in the S3 bucket folder '{folder}'.")
     except Exception as e:
         logger.exception(f"Error checking S3 bucket folder '{folder}': {e}")
+
+@celery.task
+def check_hero_review_queue_for_messages():
+    try:
+        message = redis_client.lpop('hero_review_queue')  
+        if message:
+            logger.info(f"Processing hero review message: {message}")
+            message_data = json.loads(message)
+            hero = message_data['hero']
+            channel_id = int(message_data['channel_id'])
+            content = message_data['message']
+            process_hero_review_task.delay(hero, channel_id, content)
+    except Exception as e:
+        logger.error(f"Error while checking Redis: {e}")
 
 threading.Thread(target=handle_expired_keys, daemon=True).start()

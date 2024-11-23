@@ -111,6 +111,7 @@ class Lahn(commands.Bot):
     async def setup_hook(self):
         guild = discord.Object(id=GUILD_ID)        
         # Sync commands for the specific guild
+        self.tree.add_command(submit_hero_review)
         self.tree.add_command(submit_hero_illustration)
         self.tree.add_command(submit_hero_bio)
         self.tree.add_command(submit_hero_portrait)
@@ -341,7 +342,8 @@ async def send_embed_to_channel(channel_id: int, embed_data: dict, task_id: str,
 @commands.is_owner()
 async def manual_sync_commands(ctx):
     try:
-        logger.info("Syncing commands...")         
+        logger.info("Syncing commands...")       
+        ctx.bot.tree.remove_command(submit_hero_review)  
         ctx.bot.tree.remove_command(submit_hero_story)
         ctx.bot.tree.remove_command(submit_hero_portrait)
         ctx.bot.tree.remove_command(submit_hero_illustration)
@@ -366,6 +368,7 @@ async def manual_sync_commands(ctx):
         ctx.bot.tree.add_command(submit_hero_bio)
         ctx.bot.tree.add_command(submit_hero_portrait)
         ctx.bot.tree.add_command(submit_hero_story)
+        ctx.bot.tree.add_command(submit_hero_review)
         await ctx.bot.tree.sync()
         await ctx.send("Commands synced successfully.")
         logger.info("Commands synced successfully!")
@@ -845,6 +848,45 @@ async def add_new_item(interaction: discord.Interaction, name: str):
     else:
         await interaction.followup.send(f"**Item:** {name}\nItem already exists.")
 
+@app_commands.command(name="submit_hero_review", description="Update a hero's review on the site.")
+@app_commands.describe(hero="Select a hero", message="Provide a Discord message ID to learn from")
+async def submit_hero_review(interaction: discord.Interaction, hero: str, message: str):
+    # Get the hero title from the slug
+    hero_title = hero_name_mapping.get(hero, "Unknown Hero")
+    # Acknowledge the interaction
+    await interaction.response.defer(thinking=True)
+
+    content = (await interaction.channel.fetch_message(int(message))).content
+    logger.info(f"Message content: {content}")
+
+    if hero_title != "Unknown Hero":
+        # Store the message content in Redis
+        redis_client.rpush('hero_review_queue', json.dumps({
+            'hero': hero_title,
+            'channel_id': interaction.channel.id,
+            'message': content,
+        }))
+        await interaction.followup.send(f"Thanks for submitting information about {hero_title}! It will be reviewed shortly.")
+
+# Autocomplete function for hero
+@submit_hero_review.autocomplete('hero')
+async def review_hero_autocomplete(interaction: discord.Interaction, current: str):
+    global dropdown_options
+    if dropdown_options is None:
+        logger.info("No hero data found, please try again.")
+        dropdown_options, hero_name_mapping = fetch_hero_data()
+        if dropdown_options is None: 
+            await interaction.followup.send("No hero data found. Please try again later.")
+            return
+    # Suggest hero names based on user input
+    suggestions = []
+    for slug, title in dropdown_options:
+        if current.lower() in title.lower():
+            suggestions.append(app_commands.Choice(name=title, value=slug))
+            if len(suggestions) >= 25:
+                break
+    return suggestions
+
 # Define the slash command
 @app_commands.command(name="submit_merch_information", description="Update merch equipment on the site.")
 @app_commands.describe(name="Enter the item's name (Example: 'Ocarina')")
@@ -873,11 +915,161 @@ async def submit_accessory_information(interaction: discord.Interaction, name: s
     # Get the hero title from the slug
     return 
 
-# Define the slash command
-@app_commands.command(name="submit_costume", description="Update a hero costume on the site.")
-@app_commands.describe(name="Enter the item's name (Example: 'Zora Tunic')")
-async def submit_costume(interaction: discord.Interaction, name: str):
-    # Get the hero title from the slug
-    return 
+@app_commands.command(name="submit_costume", description="Upload an image with a hero's costume to update the site.")
+@app_commands.describe(image="Attach an image of the costume information page", hero="Select a hero for hero costumes", item="Select the costume to update", item_type="Select the associated item type for equipment costumes", illustration="Attach an image of the illustration if it's a super costume")
+async def submit_costume(interaction: discord.Interaction, image: discord.Attachment, hero: str='', item: str='', item_type: str='', illustration: discord.Attachment=None):
+    isSuper = False
+    isEquipment = False
+    if hero != '':
+        hero_title = hero_name_mapping.get(hero, "Unknown Hero")
+        if illustration is not None:
+            isSuper = True
+    elif item_type != '':
+        isEquipment = True
+    item_title = item_name_mapping.get(item, "Unknown Item")
+    # Acknowledge the interaction
+    await interaction.response.defer(thinking=True)
+    # Process the image and hero name as needed
+    if image is not None:
+        filename = image.filename
+        file_content = await image.read()
+
+        # Generate a GUID
+        guid = str(uuid.uuid4())
+
+        # Construct the new filename
+        file_extension = os.path.splitext(filename)[1]
+        if isEquipment:
+            new_filename = f"equipment_{item}_{item_type}_{guid}{file_extension}"
+        else:
+            new_filename = f"hero_{item}_{hero}_{guid}{file_extension}"
+
+        # Upload the image to S3
+        s3_client = boto3.client(
+            's3',
+            aws_access_key_id=AWS_ACCESS_KEY_ID,
+            aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+            region_name=AWS_REGION,
+        )
+        s3_client.put_object(
+            Bucket=AWS_S3_BUCKET, 
+            Key=f"costumes/{new_filename}", 
+            Body=file_content
+        )
+        logger.info(f"Uploaded image to S3: {new_filename}")
+
+        # Send a confirmation message with the image
+        embed = discord.Embed(
+            title=f"Costume Uploaded",
+            description=f"{item_title} costume uploaded successfully!"
+        )
+
+    if isSuper:
+        filename = illustration.filename
+        file_content = await illustration.read()
+
+        # Generate a GUID
+        guid = str(uuid.uuid4())
+
+        # Construct the new filename
+        file_extension = os.path.splitext(filename)[1]
+        new_filename = f"hero_{item}_{hero}_{guid}{file_extension}"
+
+        # Upload the image to S3
+        s3_client = boto3.client(
+            's3',
+            aws_access_key_id=AWS_ACCESS_KEY_ID,
+            aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+            region_name=AWS_REGION,
+        )
+        s3_client.put_object(
+            Bucket=AWS_S3_BUCKET, 
+            Key=f"costume-illustrations/{new_filename}", 
+            Body=file_content
+        )
+        logger.info(f"Uploaded image to S3: {new_filename}")
+
+        # Send a confirmation message with the image
+        embed = discord.Embed(
+            title="Super Costume Illustration Uploaded",
+            description=f"{hero_title}\n Super Costume illustration uploaded successfully!"
+        )
+
+    embed.color = discord.Color.green()
+
+    # Attach the image directly to the Discord message and add it to the embed
+    discord_file = discord.File(io.BytesIO(file_content), filename=filename)
+    embed.set_image(url=f"attachment://{filename}")
+
+    # Send the embed with the attached image
+    await interaction.followup.send(embed=embed, file=discord_file)
+
+@submit_costume.autocomplete('hero')
+async def costume_hero_name_autocomplete(interaction: discord.Interaction, current: str):
+    global dropdown_options
+    if dropdown_options is None:
+        logger.info("No hero data found, please try again.")
+        dropdown_options, hero_name_mapping = fetch_hero_data()
+        if dropdown_options is None: 
+            await interaction.followup.send("No hero data found. Please try again later.")
+            return    
+    suggestions = []
+    for slug, title in dropdown_options:
+        if current.lower() in title.lower():
+            suggestions.append(app_commands.Choice(name=title, value=slug))
+            if len(suggestions) >= 25:
+                break
+    return suggestions
+
+@submit_costume.autocomplete('item')
+async def costume_item_name_autocomplete(interaction: discord.Interaction, current: str):
+    global item_options
+    if item_options is None:
+        logger.info("No item data found, trying to reload...")
+        item_options, item_name_mapping = fetch_item_data()
+        if item_options is None: 
+            await interaction.followup.send("There was a problem getting the list of items. Please try again later.")
+            return    
+    suggestions = []
+    for slug, title in item_options:
+        if current.lower() in title.lower():
+            suggestions.append(app_commands.Choice(name=title, value=slug))
+            if len(suggestions) >= 25:
+                break
+    return suggestions
+
+@submit_costume.autocomplete('item_type')
+async def costume_item_type_name_autocomplete(interaction: discord.Interaction, current: str):
+    item_types = [
+        { 'id': 'filter-mobile-category-1hsword', 'value': 'one-handed-sword', 'label': 'One-Handed Sword', 'icon': '/icons/equipment/1hsword.webp' },
+        { 'id': 'filter-mobile-category-2hsword', 'value': 'two-handed-sword', 'label': 'Two-Handed Sword', 'icon': '/icons/equipment/2hsword.webp' },
+        { 'id': 'filter-mobile-category-rifle', 'value': 'rifle', 'label': 'Rifle', 'icon': '/icons/equipment/rifle.webp' },
+        { 'id': 'filter-mobile-category-bow', 'value': 'bow', 'label': 'Bow', 'icon': '/icons/equipment/bow.webp' },
+        { 'id': 'filter-mobile-category-basket', 'value': 'basket', 'label': 'Basket', 'icon': '/icons/equipment/basket.webp' },
+        { 'id': 'filter-mobile-category-staff', 'value': 'staff', 'label': 'Staff', 'icon': '/icons/equipment/staff.webp' },
+        { 'id': 'filter-mobile-category-gauntlet', 'value': 'gauntlet', 'label': 'Gauntlet', 'icon': '/icons/equipment/gauntlet.webp' },
+        { 'id': 'filter-mobile-category-claw', 'value': 'claw', 'label': 'Claw', 'icon': '/icons/equipment/claw.webp' },
+        { 'id': 'filter-mobile-category-shield', 'value': 'shield', 'label': 'Shield', 'icon': '/icons/equipment/shield.webp' },
+        { 'id': 'filter-mobile-category-accessory', 'value': 'accessory', 'label': 'Accessory', 'icon': '/icons/equipment/accessory.webp' },
+        { 'id': 'filter-mobile-category-costume', 'value': 'costume', 'label': 'Hero Costume', 'icon': '/icons/equipment/herocostume.webp' },
+        { 'id': 'filter-mobile-category-equipmentcostume', 'value': 'equipment-costume', 'label': 'Equipment Costume', 'icon': '/icons/equipment/equipmentcostume.webp' },
+        { 'id': 'filter-mobile-category-illustrationcostume', 'value': 'illustration-costume', 'label': 'Illustration Costume', 'icon': '/icons/equipment/illustrationcostume.webp' },
+        { 'id': 'filter-mobile-category-card', 'value': 'card', 'label': 'Card', 'icon': '/icons/equipment/card.webp' },
+        { 'id': 'filter-mobile-category-merch', 'value': 'merch', 'label': 'Merch', 'icon': '/icons/equipment/merch.webp' },
+        { 'id': 'filter-mobile-category-relic', 'value': 'relic', 'label': 'Relic', 'icon': '/icons/equipment/relic.webp' },
+    ]
+    if item_types is None:
+        logger.info("No item types found, trying to reload...")
+        item_types = fetch_item_data()
+        if item_types is None: 
+            await interaction.followup.send("There was a problem getting the list of item types. Please try again later.")
+            return    
+    suggestions = []
+    for item_type in item_types:
+        if current.lower() in item_type['label'].lower():
+            suggestions.append(app_commands.Choice(name=item_type['label'], value=item_type['value']))
+            if len(suggestions) >= 25:
+                break
+    return suggestions
 
 bot.run(DISCORD_TOKEN)
