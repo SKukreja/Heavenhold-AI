@@ -83,7 +83,7 @@ def process_hero_review_task(self, hero, channel_id, content):
         message_data = {
             'channel_id': DISCORD_CHANNEL_ID, 
             'is_embed': False,
-            'message': f"Hero review for {hero['title']} has been updated. Please review the changes.",                
+            'message': f"Hero review for **{hero['title']}** has been updated. Please review the changes.",                
         }
         redis_client.rpush('discord_message_queue', json.dumps(message_data))
         logger.info(f"Sent poll to Discord for hero: {hero['title']}")

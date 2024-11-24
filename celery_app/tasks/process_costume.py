@@ -90,11 +90,11 @@ def process_costume_task(self, key, folder, item_name, hero_name, item_type):
 
             # After determining the bar widths, you can crop the image accordingly:
             img = Image.open(image_path)
-            crop_dimension = math.floor(img.width * 0.3759)
-            crop_left = math.floor(img.width * 0.3111)
-            crop_top = math.floor(img.height * 0.2796)
+            crop_dimension = math.floor(img.height * 0.275)
+            crop_left = math.floor(img.width * 0.3346)
+            crop_top = math.floor(img.height * 0.3333)
             cropped_img = img.crop((crop_left, crop_top, crop_left + crop_dimension, crop_top + crop_dimension))
-
+            logger.info(f"Crop coordinates: {crop_left}, {crop_top}, {crop_left + crop_dimension}, {crop_top + crop_dimension}")
             # Save the cropped image to separate BytesIO objects
             img_byte_arr_base64 = io.BytesIO()
             cropped_img.save(img_byte_arr_base64, format='JPEG')
@@ -104,13 +104,16 @@ def process_costume_task(self, key, folder, item_name, hero_name, item_type):
             cropped_img.save(img_byte_arr, format='JPEG')
             img_byte_arr.seek(0)
 
+            logger.info(f"{hero['databaseId']} - {item['databaseId']} - {equipment_costume_type} image processed successfully")
+            logger.info(f"hero: {hero['title']}" if hero else f"type: {equipment_costume_type['label']}")
+
             # Prepare and send the poll to Discord
             embed_data = {
                 "title": f"Costume - {item['title']}",
                 "description": "I did my best!",
                 "color": 3447003,  # Example blue color
                 "fields": [
-                    {"hero" if hero else "type": hero['title'] if hero else equipment_costume_type['label'], "inline": True},                        
+                    {"name": "Hero", "value": hero['title'], "inline": True} if hero else {"name": "type", "value": equipment_costume_type['label'], "inline": True},
                 ],
                 "footer": {"text": "Does this look correct?"}
             }
@@ -154,7 +157,7 @@ def process_costume_task(self, key, folder, item_name, hero_name, item_type):
             
             # If upvotes are higher than downvotes, post the data to WordPress
             if retry_count > 0:
-                logger.info(f"Retrying processing for {hero['title']} stats")
+                logger.info(f"Retrying processing for costume {item['title']}")
                 # Reset attempt count
                 redis_client.set('attempts:' + key, 0)
                 redis_client.delete('lock:' + key)

@@ -866,7 +866,7 @@ async def submit_hero_review(interaction: discord.Interaction, hero: str, messag
             'channel_id': interaction.channel.id,
             'message': content,
         }))
-        await interaction.followup.send(f"Thanks for submitting information about {hero_title}! It will be reviewed shortly.")
+        await interaction.followup.send(f"Thanks for submitting information about **{hero_title}**! It will be reviewed shortly.")
 
 # Autocomplete function for hero
 @submit_hero_review.autocomplete('hero')
