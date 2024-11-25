@@ -60,14 +60,12 @@ def process_costume_task(self, key, folder, item_name, hero_name, item_type):
         item_data = json.loads(cached_item_data)
         hero_data = json.loads(cached_hero_data)
         hero = next((h for h in hero_data if h['slug'] == hero_name), None)
-        item = next((i for i in item_data if i['slug'] == item_name), None)
+        item = next((i for i in item_data if i['title'] == item_name), None)
 
         if item is None:
-            logger.warning(f"Item '{item_name}' not found.")
-            return
+            logger.info(f"Item '{item_name}' not found.")
         if hero is None:
-            logger.warning(f"Hero '{hero_name}' not found.")
-            return
+            logger.info(f"Hero '{hero_name}' not found.")
 
         equipment_costume_type = next((i for i in item_types if i['value'] == item_type), None)
 
@@ -90,11 +88,11 @@ def process_costume_task(self, key, folder, item_name, hero_name, item_type):
 
             # After determining the bar widths, you can crop the image accordingly:
             img = Image.open(image_path)
-            crop_dimension = math.floor(img.height * 0.275)
-            crop_left = math.floor(img.width * 0.3346)
-            crop_top = math.floor(img.height * 0.3333)
+            crop_dimension = math.floor(img.height * 0.32592)
+            crop_left = math.floor(img.width * 0.32308)
+            crop_top = math.floor(img.height * 0.28241)
             cropped_img = img.crop((crop_left, crop_top, crop_left + crop_dimension, crop_top + crop_dimension))
-            logger.info(f"Crop coordinates: {crop_left}, {crop_top}, {crop_left + crop_dimension}, {crop_top + crop_dimension}")
+            #logger.info(f"Crop coordinates: {crop_left}, {crop_top}, {crop_left + crop_dimension}, {crop_top + crop_dimension}")
             # Save the cropped image to separate BytesIO objects
             img_byte_arr_base64 = io.BytesIO()
             cropped_img.save(img_byte_arr_base64, format='JPEG')
@@ -102,18 +100,15 @@ def process_costume_task(self, key, folder, item_name, hero_name, item_type):
 
             img_byte_arr = io.BytesIO()
             cropped_img.save(img_byte_arr, format='JPEG')
-            img_byte_arr.seek(0)
-
-            logger.info(f"{hero['databaseId']} - {item['databaseId']} - {equipment_costume_type} image processed successfully")
-            logger.info(f"hero: {hero['title']}" if hero else f"type: {equipment_costume_type['label']}")
+            img_byte_arr.seek(0)        
 
             # Prepare and send the poll to Discord
             embed_data = {
-                "title": f"Costume - {item['title']}",
+                "title": f"Costume - {item_name}",
                 "description": "I did my best!",
                 "color": 3447003,  # Example blue color
                 "fields": [
-                    {"name": "Hero", "value": hero['title'], "inline": True} if hero else {"name": "type", "value": equipment_costume_type['label'], "inline": True},
+                    {"name": "Hero", "value": hero['title'], "inline": True} if hero else {"name": "Type", "value": equipment_costume_type['label'], "inline": True},
                 ],
                 "footer": {"text": "Does this look correct?"}
             }
@@ -134,7 +129,7 @@ def process_costume_task(self, key, folder, item_name, hero_name, item_type):
                 'task_id': process_costume_task.request.id
             }
             redis_client.rpush('discord_message_queue', json.dumps(poll_data))
-            logger.info(f"Sent poll to Discord for costume: {item['title']}")
+            logger.info(f"Sent poll to Discord for costume: {item_name}")
             
             # Wait for poll result (e.g., 120 seconds)
             result_key = f"discord_poll_result:{process_costume_task.request.id}"
@@ -157,7 +152,7 @@ def process_costume_task(self, key, folder, item_name, hero_name, item_type):
             
             # If upvotes are higher than downvotes, post the data to WordPress
             if retry_count > 0:
-                logger.info(f"Retrying processing for costume {item['title']}")
+                logger.info(f"Retrying processing for costume {item_name}")
                 # Reset attempt count
                 redis_client.set('attempts:' + key, 0)
                 redis_client.delete('lock:' + key)
@@ -169,8 +164,9 @@ def process_costume_task(self, key, folder, item_name, hero_name, item_type):
                 'image': (item_name + '.jpg', img_byte_arr, 'image/jpeg')
             }
             payload = {
-                'hero_id': str(hero['databaseId']),
-                'item_id': str(item['databaseId']),
+                'hero_id': str(hero.get('databaseId','')) if hero else '',
+                'item_id': str(item.get('databaseId','')) if item else '',
+                'item_name': item_name,
                 'item_type': equipment_costume_type['label'] if equipment_costume_type else '',
                 'confirmed': '1' if upvotes > downvotes else '0'
             }

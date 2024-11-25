@@ -926,7 +926,7 @@ async def submit_costume(interaction: discord.Interaction, image: discord.Attach
             isSuper = True
     elif item_type != '':
         isEquipment = True
-    item_title = item_name_mapping.get(item, "Unknown Item")
+
     # Acknowledge the interaction
     await interaction.response.defer(thinking=True)
     # Process the image and hero name as needed
@@ -961,7 +961,7 @@ async def submit_costume(interaction: discord.Interaction, image: discord.Attach
         # Send a confirmation message with the image
         embed = discord.Embed(
             title=f"Costume Uploaded",
-            description=f"{item_title} costume uploaded successfully!"
+            description=f"{item} costume uploaded successfully!"
         )
 
     if isSuper:
@@ -1033,7 +1033,7 @@ async def costume_item_name_autocomplete(interaction: discord.Interaction, curre
     suggestions = []
     for slug, title in item_options:
         if current.lower() in title.lower():
-            suggestions.append(app_commands.Choice(name=title, value=slug))
+            suggestions.append(app_commands.Choice(name=title, value=title))
             if len(suggestions) >= 25:
                 break
     return suggestions
