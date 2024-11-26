@@ -940,9 +940,9 @@ async def submit_costume(interaction: discord.Interaction, image: discord.Attach
         # Construct the new filename
         file_extension = os.path.splitext(filename)[1]
         if isEquipment:
-            new_filename = f"equipment_{item}_{item_type}_{guid}{file_extension}"
+            new_filename = f"equipment_{item.replace('.','(dot)')}_{item_type}_{guid}{file_extension}"
         else:
-            new_filename = f"hero_{item}_{hero}_{guid}{file_extension}"
+            new_filename = f"hero_{item.replace('.','(dot)')}_{hero.replace('.','(dot)')}_{guid}{file_extension}"
 
         # Upload the image to S3
         s3_client = boto3.client(
@@ -973,7 +973,7 @@ async def submit_costume(interaction: discord.Interaction, image: discord.Attach
 
         # Construct the new filename
         file_extension = os.path.splitext(filename)[1]
-        new_filename = f"hero_{item}_{hero}_{guid}{file_extension}"
+        new_filename = f"hero_{item.replace('.','(dot)')}_{hero.replace('.','(dot)')}_{guid}{file_extension}"
 
         # Upload the image to S3
         s3_client = boto3.client(

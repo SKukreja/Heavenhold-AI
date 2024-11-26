@@ -185,17 +185,17 @@ def check_and_process_s3_images(folder):
                             process_hero_stats_task.delay(key, folder, slug_name)
                         elif folder == "costumes":
                             costume_type = file_name_parts[0]
-                            item_name = file_name_parts[1]
+                            item_name = file_name_parts[1].replace('(dot)', '.')
                             hero_name = None
                             item_type = None
                             if(costume_type == "hero"):
-                                hero_name = file_name_parts[2]
+                                hero_name = file_name_parts[2].replace('(dot)', '.')
                             if(costume_type == "equipment"):
                                 item_type = file_name_parts[2]
                             process_costume_task.delay(key, folder, item_name, hero_name, item_type)
                         elif folder == "costume-illustrations":
-                            item_name = file_name_parts[1]
-                            hero_name = file_name_parts[2]
+                            item_name = file_name_parts[1].replace('(dot)','.')
+                            hero_name = file_name_parts[2].replace('(dot)','.')
                             process_costume_illustration_task.delay(key, folder, item_name, hero_name)
 
                     elif filename != '':
