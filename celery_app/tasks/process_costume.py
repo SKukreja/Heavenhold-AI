@@ -9,6 +9,8 @@ import boto3
 import os
 from celery import shared_task
 from PIL import Image
+
+from celery_app.tasks import fetch_item_data
 from ..utils import encode_image_to_base64, redis_client, boto3_config
 from config import DISCORD_CHANNEL_ID, WORDPRESS_SITE, AWS_S3_BUCKET
 
@@ -202,4 +204,5 @@ def process_costume_task(self, key, folder, item_name, hero_name, item_type):
         else:
             logger.exception(f"Error processing image {key}. Retrying after 180 seconds.")
             redis_client.delete('lock:' + key)
+            fetch_item_data.delay()  
             raise self.retry(exc=e, countdown=180)

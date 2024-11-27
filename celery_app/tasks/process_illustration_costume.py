@@ -40,11 +40,10 @@ def process_costume_illustration_task(self, key, folder, item_name, hero_name):
         item_data = json.loads(cached_item_data)
         hero_data = json.loads(cached_hero_data)
         hero = next((h for h in hero_data if h['slug'] == hero_name), None)
-        item = next((i for i in item_data if i['slug'] == item_name), None)
+        item = next((i for i in item_data if i['title'] == item_name), None)
 
-        if item is None:
-            logger.warning(f"Item '{item_name}' not found.")
-            return
+        if item is None:                        
+            raise Exception(f"Item '{item_name}' not found.")
 
         # Initialize S3 client using app.config variables
         s3_client = boto3.client('s3', **boto3_config)
