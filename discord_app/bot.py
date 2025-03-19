@@ -156,6 +156,13 @@ async def check_redis_for_messages():
     except Exception as e:
         logger.error(f"Error while checking Redis: {e}")
 
+@tasks.loop(seconds=120)
+async def check_redis_for_messages():
+    global item_options, item_name_mapping, dropdown_options, hero_name_mapping
+    item_options, item_name_mapping = fetch_item_data()
+    dropdown_options, hero_name_mapping = fetch_hero_data()
+
+
 async def send_message_to_channel(channel_id: int, message: str):
     channel = bot.get_channel(channel_id)
     if channel:
